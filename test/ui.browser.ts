@@ -46,6 +46,52 @@ async function fitsViewport(page:Page,selector:string) {
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
 }
 
+test('Chinese file links display, preview, copy and open native paths after Markdown rendering', async ({ page, context }) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'viewer-links-')), root = path.join(dir, 'project');
+  await mkdir(path.join(root, '树洞'), { recursive: true });
+  const relative = '树洞/中文 空格.md', literal = '树洞/记录%20.md';
+  for (const file of [relative, literal]) await writeFile(path.join(root, file), '第一行\n目标行\n第三行');
+  const opened: { path: string; line: number; column: number }[] = [];
+  const app = await serve({ roots: [root], dataDir: dir + '/data', runtimeDir: dir + '/run', port: 0,
+    adapter: new AppServer({ command: process.execPath, args: [path.resolve('test/fake-codex.ts')] }), editor: async file => { opened.push(file); } });
+  try {
+    await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: app.origin });
+    await page.goto(app.launchUrl);
+    const { thread } = await (await page.request.post(app.origin + '/api/threads', { headers: { origin: app.origin }, data: { cwd: root } })).json();
+    await page.goto(app.origin + '/#' + thread.id);
+    const source = `[中文绝对](<${root}/${relative}:2:3>)\n\n[编码相对][ref]\n\n[百分号](<${encodeURI(literal)}:2>)\n\n[ref]: <${encodeURI(relative)}#L3>`;
+    await expect(page.locator('#send')).toBeEnabled(); await page.locator('#prompt').fill('render-markdown\n' + source); await page.locator('#send').click();
+    const links = page.locator('.assistant a[data-file]'); await expect(links).toHaveCount(3); await expect(page.locator('#send')).toBeEnabled();
+    const cases = [
+      { target: `${root}/${relative}:2:3`, path: path.join(root, relative), line: 2, column: 3 },
+      { target: relative + '#L3', path: path.join(root, relative), line: 3, column: 1 },
+      { target: literal + ':2', path: path.join(root, literal), line: 2, column: 1 },
+    ];
+    for (const [index, item] of cases.entries()) {
+      const link = links.nth(index); await expect(link).toHaveAttribute('data-file', item.target);
+      await expect(link).toContainText(' · ' + item.target.split('/').at(-1));
+      await link.click(); const card = page.locator('.reference-card');
+      await expect(card.locator('.target-line')).toHaveText(item.line === 2 ? '2  目标行' : '3  第三行');
+      await expect(card.locator('code')).toHaveText(`${item.path}:${item.line}`);
+      await card.getByRole('button', { name: '复制路径 / URL', exact: true }).click();
+      expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(item.target);
+      if (index === 0) await page.screenshot({ path: 'test-results/viewer-chinese-paths.png', fullPage: true });
+      await card.getByRole('button', { name: '在 VS Code 打开', exact: true }).click();
+      await expect.poll(() => opened.length).toBe(index + 1); await page.keyboard.press('Escape');
+    }
+    expect(opened).toEqual(cases.map(({ target, ...file }) => file));
+    await links.first().click({ modifiers: ['Control'] }); await expect.poll(() => opened.length).toBe(4);
+    expect(opened[3]).toEqual(opened[0]);
+    await page.getByRole('button', { name: '复制 Markdown', exact: true }).click();
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(source);
+    const selected = await links.first().evaluate(el => {
+      const range = document.createRange(); range.selectNodeContents(el); const selection = getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+      const data = new DataTransfer(); el.dispatchEvent(new ClipboardEvent('copy', { bubbles: true, clipboardData: data })); selection.removeAllRanges(); return data.getData('text/plain');
+    });
+    expect(selected).toBe(`[中文绝对](<${root}/${relative}:2:3>)`);
+  } finally { await app.stop(); await rm(dir, { recursive: true, force: true }); }
+});
+
 test('render, source copy, upload, approval and reconnect', async ({page,context}) => {
   const dir = await mkdtemp(path.join(os.tmpdir(),'viewer-browser-')); const root=path.join(dir,'project'); await mkdir(root);
   await writeFile(path.join(root,'sample.py'),'first line\ntarget line\nthird line');
@@ -88,8 +134,8 @@ test('render, source copy, upload, approval and reconnect', async ({page,context
     await page.locator('#prompt').fill('approve'); await page.locator('#send').click();
     await expect(page.locator('.approval.windows')).toBeVisible();
     await page.screenshot({path:'test-results/viewer-approval.png',fullPage:true});
-    await page.setViewportSize({width:390,height:844});
-    await page.screenshot({path:'test-results/viewer-approval-mobile.png',fullPage:true});
+    await page.setViewportSize({width:1920,height:844});
+    await page.screenshot({path:'test-results/viewer-approval-widescreen.png',fullPage:true});
     for (const id of ['attach','stop','send']) {
       const action=page.locator('#'+id);
       await expect(action).toHaveCSS('white-space','nowrap');
@@ -98,12 +144,13 @@ test('render, source copy, upload, approval and reconnect', async ({page,context
     await fitsViewport(page,'.composer-actions, #attach, #stop, #send');
     await page.setViewportSize({width:1280,height:720});
     await page.reload(); await expect(page.locator('.approval.windows')).toBeVisible();
-    const firstTitle=await page.locator('#threads strong').first().innerText();
+    const firstId=new URL(page.url()).hash.slice(1);
     await page.locator('#new').click(); await page.getByRole('button',{name:'▱ '+root,exact:true}).click(); await page.locator('#folder-select').click();
+    await expect(page.locator('#folder-dialog')).toBeHidden();
     await expect(page.locator('#send')).toBeEnabled(); await page.locator('#prompt').fill('second task'); await page.locator('#send').click();
     await expect(page.locator('.katex')).toBeVisible();
     await page.reload(); await expect(page.locator('.markdown table')).toBeVisible();
-    await page.locator('#threads .thread').filter({hasText:firstTitle}).click(); await expect(page.locator('.approval.windows')).toBeVisible();
+    await page.locator(`#threads .thread[data-thread-id="${firstId}"]`).click(); await expect(page.locator('.approval.windows')).toBeVisible();
     page.on('dialog',()=>{throw new Error('Unexpected confirmation dialog');}); await page.getByRole('button',{name:'允许本次 Windows 操作',exact:true}).click();
     await expect(page.locator('.katex')).toBeVisible(); await expect(page.locator('.markdown table')).toBeVisible();
     await expect(page.locator('#threads .project')).toHaveCount(1);
@@ -169,15 +216,143 @@ test('render, source copy, upload, approval and reconnect', async ({page,context
     await page.setViewportSize({width:1440,height:1080});
     await page.locator('.assistant').evaluate(el=>el.scrollIntoView({block:'start'}));
     await page.screenshot({path:'test-results/viewer-reading.png',fullPage:true});
-    await page.setViewportSize({width:390,height:844});await page.screenshot({path:'test-results/viewer-mobile.png',fullPage:true});
+    await page.setViewportSize({width:1920,height:844});await page.screenshot({path:'test-results/viewer-widescreen.png',fullPage:true});
     await page.locator('.assistant').evaluate(el=>el.scrollIntoView({block:'start'}));
-    await page.screenshot({path:'test-results/viewer-reading-mobile-top.png',fullPage:true});
+    await page.screenshot({path:'test-results/viewer-reading-widescreen-top.png',fullPage:true});
     expect(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth)).toBe(true);
   } finally { await app.stop(); await rm(dir,{recursive:true,force:true}); }
 });
 
-for (const width of [1280,390]) test(`long content, streaming and manual reading at ${width}px`, async ({page})=>{
-  await page.setViewportSize({width,height:width===390?844:720});
+test('bracket math streams, renders and copies its exact original source',async({page,context})=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),'viewer-math-'));
+  const app=await serve({roots:[dir],dataDir:path.join(dir,'data'),runtimeDir:path.join(dir,'run'),port:0,adapter:new AppServer({command:process.execPath,args:[path.resolve('test/fake-codex.ts')]})});
+  try {
+    await context.grantPermissions(['clipboard-read','clipboard-write'],{origin:app.origin});
+    await page.goto(app.launchUrl);await page.locator('#welcome-new').click();await page.getByRole('button',{name:'▱ '+dir,exact:true}).click();await page.locator('#folder-select').click();
+    await expect(page.locator('#send')).toBeEnabled();await page.locator('#prompt').fill('bracket-math');await page.locator('#send').click();
+    const body=page.locator('.assistant .markdown');
+    await expect(body).toContainText('\\[');await expect(body.locator('.katex')).toHaveCount(0);
+    await expect(body.locator('.katex')).toHaveCount(4);await expect(body.locator('.katex-display')).toHaveCount(2);
+    await expect(body.locator('.katex-error')).toHaveCount(0);await expect(body.locator('pre code')).toHaveText('\\[这段代码不渲染\\]\n');
+    await page.locator('.assistant').getByRole('button',{name:'复制 Markdown',exact:true}).click();
+    const original=await page.evaluate(()=>navigator.clipboard.readText());
+    expect(original).toContain('\\[\nx=F_C');expect(original).toContain('\\(x=\\frac{1}{2}\\)');
+    const selected=await body.locator('.katex').first().evaluate(el=>{
+      const range=document.createRange();range.selectNodeContents(el);const selection=window.getSelection()!;selection.removeAllRanges();selection.addRange(range);
+      const data=new DataTransfer();el.dispatchEvent(new ClipboardEvent('copy',{bubbles:true,clipboardData:data}));return data.getData('text/plain');
+    });
+    expect(selected).toBe(original.slice(0,original.indexOf('\\]')+2));
+    const inline=await body.locator('.katex').nth(2).evaluate(el=>{
+      const range=document.createRange();range.selectNodeContents(el);const selection=window.getSelection()!;selection.removeAllRanges();selection.addRange(range);
+      const data=new DataTransfer();el.dispatchEvent(new ClipboardEvent('copy',{bubbles:true,clipboardData:data}));return data.getData('text/plain');
+    });
+    expect(inline).toBe('\\(x=\\frac{1}{2}\\)');await page.evaluate(()=>window.getSelection()?.removeAllRanges());
+    await page.setViewportSize({width:1440,height:1080});await body.evaluate(el=>el.scrollIntoView({block:'start'}));
+    await page.screenshot({path:'test-results/viewer-bracket-math.png',fullPage:true});
+    await page.setViewportSize({width:1920,height:844});await fitsViewport(page,'#conversation');
+    await body.locator('.katex-display').nth(1).scrollIntoViewIfNeeded();
+    await page.screenshot({path:'test-results/viewer-bracket-math-1920.png',fullPage:true});
+    await page.reload();await expect(page.locator('.assistant .katex')).toHaveCount(4);
+  }finally{await app.stop();await rm(dir,{recursive:true,force:true});}
+});
+
+test('two concurrent conversations retain both user inputs across reordered events, switching and reload',async({page,context})=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),'viewer-concurrent-'));
+  const adapter=new AppServer({command:process.execPath,args:[path.resolve('test/fake-codex.ts')],env:{...process.env,VIEWER_FAKE_REORDER_TURNS:'1'}});
+  const app=await serve({roots:[dir],dataDir:path.join(dir,'data'),runtimeDir:path.join(dir,'run'),port:0,adapter});
+  try {
+    await page.goto(app.launchUrl);const second=await context.newPage();await second.goto(app.origin);
+    const pages=[page,second];const ids:string[]=[];
+    for(const p of pages) {
+      await p.locator('#welcome-new').click();await p.getByRole('button',{name:'▱ '+dir,exact:true}).click();await p.locator('#folder-select').click();
+      await expect(p.locator('#send')).toBeEnabled();ids.push(new URL(p.url()).hash.slice(1));
+    }
+    for(let round=1;round<=2;round++) {
+      for(const p of pages)await p.locator('#prompt').fill('并发实验');
+      await Promise.all(pages.map(p=>p.locator('#send').click()));
+      for(const p of pages) {
+        await expect(p.locator('.message.user')).toHaveCount(round);
+        await expect(p.locator('.message.user').last()).toHaveText('你并发实验');
+        await expect(p.locator('#stop')).toBeHidden();
+        await expect(p.locator('#send')).toBeEnabled();
+        await expect(p.locator('.message.user')).toHaveCount(round);
+        const order=await p.locator('.message.user, .message.assistant').evaluateAll(els=>els.map(el=>el.classList.contains('user')?'user':'assistant'));
+        expect(order).toEqual(Array.from({length:round},()=>['user','assistant']).flat());
+        const snap=await p.evaluate(async(id)=>{const r=await fetch('/api/threads/'+id);return r.json();},new URL(p.url()).hash.slice(1));
+        expect(snap.thread.turns.flatMap((t:{items:{type:string}[]})=>t.items).filter((i:{type:string})=>i.type==='userMessage')).toHaveLength(round);
+      }
+    }
+    // Select the other conversation without a page reload, then recover from a full reload.
+    await page.locator('#threads .thread:not(.selected)').click();await expect(page).toHaveURL(app.origin+'/#'+ids[1]);
+    await expect(page.locator('.message.user')).toHaveCount(2);
+    // Reproduce an already-damaged in-memory cache without altering persisted history.
+    const broken=structuredClone((await adapter.call('thread/read',{threadId:ids[1],includeTurns:true})).thread) as {id:string;turns:{items:{type:string}[]}[]};
+    broken.turns.at(-1)!.items=broken.turns.at(-1)!.items.filter(i=>i.type!=='userMessage');
+    adapter.emit('notice',{method:'thread/started',params:{thread:broken}});
+    const before=await page.evaluate(async(id)=>(await (await fetch('/api/threads/'+id)).json()).thread,ids[1]);
+    expect(before.turns.flatMap((t:{items:{type:string}[]})=>t.items).filter((i:{type:string})=>i.type==='userMessage')).toHaveLength(1);
+    await page.reload();await expect(page.locator('.message.user')).toHaveCount(2);
+    await expect(page.locator('.message.user').last()).toHaveText('你并发实验');
+    await page.locator('.message.user').last().scrollIntoViewIfNeeded();
+    await page.screenshot({path:'test-results/viewer-concurrent-messages.png',fullPage:true});
+    await second.close();
+  }finally{await app.stop();await rm(dir,{recursive:true,force:true});}
+});
+
+test('automatic titles, manual rename, cross-tab events and external refresh',async({page,context})=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),'viewer-title-ui-'));
+  const adapter=new AppServer({command:process.execPath,args:[path.resolve('test/fake-codex.ts')]});
+  const call=adapter.call.bind(adapter);let externalName:string|undefined;let failNaming=false;
+  let releaseName:()=>void=()=>{};let delayed=true;
+  adapter.call=async(method,params={})=>{
+    if(method==='thread/name/set') {
+      if(failNaming)throw new Error('模拟命名失败');
+      if(delayed){delayed=false;await new Promise<void>(resolve=>{releaseName=resolve;});}
+    }
+    const result=await call(method,params);
+    if(externalName!==undefined){
+      if(method==='thread/read')(result.thread as {name:string}).name=externalName;
+      if(method==='thread/list')for(const t of result.data as {name:string}[])t.name=externalName;
+    }
+    return result;
+  };
+  const app=await serve({roots:[dir],dataDir:path.join(dir,'data'),runtimeDir:path.join(dir,'run'),port:0,adapter});
+  try{
+    await page.goto(app.launchUrl);await expect(page.locator('#rename')).toBeHidden();
+    await page.locator('#welcome-new').click();await page.getByRole('button',{name:'▱ '+dir,exact:true}).click();await page.locator('#folder-select').click();
+    await expect(page.locator('#send')).toBeEnabled();await expect(page.locator('#title')).toHaveText('新任务');
+    await page.locator('#prompt').fill('# 自动命名演示\n详细任务内容');await page.locator('#send').click();
+    await expect(page.locator('#title')).toHaveText('自动命名演示');
+    await expect(page.locator('#threads strong')).toHaveText('自动命名演示');
+    await expect.poll(()=>delayed).toBe(false);releaseName();
+    await expect(page.locator('#title')).toHaveText('概括任务目的');
+    await expect(page.locator('#threads strong')).toHaveText('概括任务目的');
+    await expect(page.locator('#send')).toBeEnabled();
+    await page.reload();await expect(page.locator('#title')).toHaveText('概括任务目的');
+    await page.locator('#rename').click();await expect(page.locator('#thread-name')).toBeFocused();
+    await page.locator('#thread-name').fill('');await page.locator('#name-save').click();await expect(page.locator('#name-dialog')).toBeVisible();
+    await page.locator('#thread-name').fill('自定义标题');failNaming=true;
+    await page.locator('#name-save').click();await expect(page.locator('#name-error')).toContainText('模拟命名失败');
+    await expect(page.locator('#title')).toHaveText('概括任务目的');failNaming=false;
+    await page.locator('#name-save').click();await expect(page.locator('#name-dialog')).not.toBeVisible();
+    await expect(page.locator('#title')).toHaveText('自定义标题');
+    const second=await context.newPage();await second.goto(page.url());await expect(second.locator('#title')).toHaveText('自定义标题');
+    await page.locator('#rename').click();await page.locator('#thread-name').fill('跨页同步标题');await page.locator('#name-save').click();
+    await expect(second.locator('#title')).toHaveText('跨页同步标题');await expect(second.locator('#threads strong')).toHaveText('跨页同步标题');
+    externalName='来自 CLI 的标题';
+    await page.locator('#refresh').click();await expect(page.locator('#title')).toHaveText(externalName);await expect(page.locator('#threads strong')).toHaveText(externalName);
+    await expect(page.locator('.katex')).toBeVisible();
+    await page.reload();await expect(page.locator('#title')).toHaveText(externalName);
+    await page.setViewportSize({width:1920,height:844});await page.locator('#rename').click();
+    await fitsViewport(page,'.topbar, #rename, #name-dialog, #thread-name, #name-save');
+    await page.screenshot({path:'test-results/viewer-rename-1920.png',fullPage:true});
+    await page.keyboard.press('Escape');await expect(page.locator('#name-dialog')).not.toBeVisible();await expect(page.locator('#rename')).toBeFocused();
+    await second.close();
+  }finally{releaseName();await app.stop();await rm(dir,{recursive:true,force:true});}
+});
+
+for (const width of [1280,1920]) test(`long content, streaming and manual reading at ${width}px`, async ({page})=>{
+  await page.setViewportSize({width,height:width===1920?844:720});
   const dir=await mkdtemp(path.join(os.tmpdir(),'viewer-reading-'));
   const root=path.join(dir,'项目目录-'+ 'long-project-path-'.repeat(5));await mkdir(root);
   await writeFile(path.join(root,'sample.py'),'first line\ntarget line\nthird line');

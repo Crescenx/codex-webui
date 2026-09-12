@@ -3,8 +3,8 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { AppServer } from '../server/adapter.ts';
-import { threadFrom, object } from '../server/protocol.ts';
-import type { Notice } from '../server/protocol.ts';
+import { threadFrom, object } from '../shared/protocol.ts';
+import type { Notice } from '../shared/protocol.ts';
 
 // Opt-in live check: consumes one short model response, with no tool permission grants.
 const cwd = await mkdtemp(path.join(os.tmpdir(),'viewer-live-'));

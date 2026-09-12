@@ -24,6 +24,11 @@ export async function bytes(req: IncomingMessage, max: number) {
   }
   return Buffer.concat(chunks);
 }
+export function imageMime(data: Buffer): string | undefined {
+  if (data.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10]))) return 'image/png';
+  if (data[0] === 255 && data[1] === 216 && data[2] === 255) return 'image/jpeg';
+  if (data.subarray(0, 4).toString() === 'RIFF' && data.subarray(8,12).toString() === 'WEBP') return 'image/webp';
+}
 export type Attachment = { id: string; name: string; size: number; mime: string; path: string; created: number };
 export class Uploads {
   private busy = false;
@@ -54,10 +59,7 @@ export class Uploads {
       name = path.basename(name.replaceAll('\\', '/')).replace(/[\x00-\x1f]/g, '').slice(0, 200) || 'attachment';
       const id = randomUUID();
       const ext = /^\.[a-z0-9]{1,12}$/i.test(path.extname(name)) ? path.extname(name).toLowerCase() : '.bin';
-      let mime = 'application/octet-stream';
-      if (data.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10]))) mime = 'image/png';
-      else if (data[0] === 255 && data[1] === 216 && data[2] === 255) mime = 'image/jpeg';
-      else if (data.subarray(0, 4).toString() === 'RIFF' && data.subarray(8,12).toString() === 'WEBP') mime = 'image/webp';
+      const mime = imageMime(data) || 'application/octet-stream';
       const a: Attachment = { id, name, mime, size: data.length, path: path.join(this.root, id + ext), created: Date.now() };
       const f = await open(a.path, 'wx', 0o600);
       try { await f.writeFile(data); } finally { await f.close(); }

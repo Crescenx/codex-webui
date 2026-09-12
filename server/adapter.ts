@@ -1,30 +1,39 @@
 import { spawn } from 'node:child_process';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { object, string } from './protocol.ts';
-import type { Obj } from './protocol.ts';
+import { object, string } from '../shared/protocol.ts';
+import type { Obj } from '../shared/protocol.ts';
 
 export class AppServer extends EventEmitter {
   child?: ChildProcessWithoutNullStreams;
   private next = 0;
   private pending = new Map<number, { resolve: (v: Obj) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
   private starting?: Promise<void>;
+  private restarting?: Promise<void>;
   private buffer = '';
   private closed = false;
   constructor(privateOptions: { command?: string; args?: string[]; cwd?: string; env?: NodeJS.ProcessEnv } = {}) {
     super(); this.options = privateOptions;
   }
   private options: { command?: string; args?: string[]; cwd?: string; env?: NodeJS.ProcessEnv };
+  private launchOptions: { args?: string[]; env?: NodeJS.ProcessEnv } = {};
+  configureLaunch(options: { args?: string[]; env?: NodeJS.ProcessEnv }) {
+    if (this.child) throw new Error('Configure launch before starting Codex');
+    // Per-instance additions survive reconnects, but are not inherited by forked workers.
+    this.launchOptions = options;
+  }
   async start(): Promise<void> {
-    if (this.starting) return this.starting;
     if (this.closed) throw new Error('App Server stopped');
+    if (this.restarting) return this.restarting;
+    if (this.starting) return this.starting;
     this.starting = this.launch();
     try { await this.starting; } catch (error) { this.child?.kill(); this.starting = undefined; throw error; }
   }
   private async launch(): Promise<void> {
     this.buffer = '';
-    const child = spawn(this.options.command || 'codex', this.options.args || ['app-server', '--listen', 'stdio://'], {
-      cwd: this.options.cwd, env: this.options.env || process.env, stdio: ['pipe', 'pipe', 'pipe'], shell: false,
+    const args = [...(this.options.args || ['app-server', '--listen', 'stdio://']), ...(this.launchOptions.args || [])];
+    const child = spawn(this.options.command || 'codex', args, {
+      cwd: this.options.cwd, env: { ...(this.options.env || process.env), ...this.launchOptions.env }, stdio: ['pipe', 'pipe', 'pipe'], shell: false,
     });
     this.child = child;
     child.stdout.setEncoding('utf8');
@@ -83,5 +92,25 @@ export class AppServer extends EventEmitter {
   async call(method: string, params: Obj = {}): Promise<Obj> { await this.start(); return this.raw(method, params); }
   respond(id: unknown, result: Obj) { this.send({ id, result }); }
   unsupported(id: unknown) { this.send({ id, error: { code: -32601, message: 'This client does not support this request' } }); }
+  fork() { return new AppServer(this.options); }
+  restart(): Promise<void> {
+    if (this.closed) return Promise.reject(new Error('App Server stopped'));
+    if (this.restarting) return this.restarting;
+    const job = (async () => {
+      const child = this.child;
+      if (child) await new Promise<void>(resolve => {
+        const timer = setTimeout(() => child.kill('SIGKILL'), 5000);
+        child.once('close', () => { clearTimeout(timer); resolve(); });
+        child.kill();
+      });
+      if (this.closed) throw new Error('App Server stopped');
+      this.starting = this.launch();
+      try { await this.starting; }
+      catch (error) { this.child?.kill(); this.starting = undefined; throw error; }
+    })();
+    this.restarting = job;
+    void job.finally(() => { if (this.restarting === job) this.restarting = undefined; }).catch(() => {});
+    return job;
+  }
   stop() { this.closed = true; this.child?.kill(); }
 }

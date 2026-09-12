@@ -1,53 +1,98 @@
-import { unified } from 'unified';
+import { unified, type Processor } from 'unified';
 import remarkParse from 'remark-parse';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
+import { remarkBracketMath } from './math.ts';
 import remarkCjkFriendly from 'remark-cjk-friendly/parseOnly';
 import remarkRehype from 'remark-rehype';
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import rehypeKatex from 'rehype-katex';
 import { highlightBlocks } from './highlight.ts';
 import rehypeStringify from 'rehype-stringify';
-import type { Root as MarkdownRoot } from 'mdast';
+import type { Root as MarkdownRoot, Data } from 'mdast';
 import type { Root as HtmlRoot, Element } from 'hast';
+import type { Extension } from 'mdast-util-from-markdown';
+declare module 'mdast' { interface Data { fenceClosed?: boolean; fenceSeen?: boolean } }
 
-const parser = unified().use(remarkParse).use(remarkGfm).use(remarkCjkFriendly).use(remarkMath);
-type Node = { type: string; position?: { start: { offset?: number }; end: { offset?: number } }; children?: Node[] };
-export type Rendered = { html: string; atoms: Map<string, string> };
-export function renderMarkdown(source: string): Rendered {
+// Observe the existing tokenizer: quoted/list fences and partial closing markers
+// must have exactly the same meaning here as they do in Markdown.
+function remarkFenceState(this: Processor) {
+  const extension: Extension = { enter: { codeFencedFence() {
+    const node = this.stack.findLast(node => node.type === 'code')!;
+    node.data ??= {};
+    node.data.fenceClosed = !!node.data.fenceSeen;
+    node.data.fenceSeen = true;
+  } } };
+  (this.data().fromMarkdownExtensions ??= []).push(extension);
+}
+const parser = unified().use(remarkParse).use(remarkGfm).use(remarkCjkFriendly).use(remarkMath).use(remarkBracketMath).use(remarkFenceState);
+type Node = { type: string; lang?: string | null; value?: string; data?: Data; position?: { start: { offset?: number }; end: { offset?: number } }; children?: Node[] };
+export type MermaidBlock = { id: string; source: string; closed: boolean };
+export type Rendered = { html: string; atoms: Map<string, string>; diagrams: MermaidBlock[] };
+const converter = unified().use(remarkRehype);
+const sanitizer = unified().use(rehypeSanitize, {
+    ...defaultSchema,
+    attributes: {
+      ...defaultSchema.attributes,
+      '*': [...(defaultSchema.attributes?.['*'] || []), 'dataAtom','dataCopyIgnore','dataMermaid'],
+      a: [...(defaultSchema.attributes?.a || []), 'target', 'rel','dataFile','dataExternal','tabIndex','role'],
+      small:['className','dataCopyIgnore'],
+      code: [...(defaultSchema.attributes?.code || []).filter(a=>(Array.isArray(a)?a[0]:a)!=='className'), ['className', /^language-./, 'math-inline', 'math-display']],
+    },
+  });
+const formatter = unified().use(highlightBlocks)
+    .use(rehypeKatex, { trust: false, throwOnError: false, maxExpand: 500 }).use(rehypeStringify);
+export function renderMarkdown(source: string, threadId?: string, cache = new Map<string, string>()): Rendered {
   const tree = parser.parse(source);
   const atoms = new Map<string,string>();
   const positions = new Map<string,string>();
+  const diagrams: MermaidBlock[] = [];
   const visit = (node: Node) => {
     if (['math','inlineMath','code','inlineCode','link','linkReference','image','imageReference'].includes(node.type) && node.position) {
       const { start, end } = node.position;
       if (start.offset !== undefined && end.offset !== undefined) {
         const id = `a${atoms.size}`; atoms.set(id, source.slice(start.offset, end.offset));
         positions.set(`${start.offset}:${end.offset}`, id);
+        if (node.type === 'code' && node.lang?.toLowerCase() === 'mermaid' && node.data?.fenceSeen) {
+          diagrams.push({ id: String(start.offset), source: node.value || '', closed: !!node.data.fenceClosed });
+        }
       }
     }
     node.children?.forEach(visit);
   };
   visit(tree);
-  const processor = unified().use(remarkRehype).use(() => (root: HtmlRoot) => {
+  const diagramStarts = new Set(diagrams.map(block => block.id));
+  const root = converter.runSync(tree as MarkdownRoot);
+  {
     const walk = (node: HtmlRoot | Element | HtmlRoot['children'][number]) => {
       if (node.type === 'element') {
         const key = `${node.position?.start.offset}:${node.position?.end.offset}`;
         const id = positions.get(key);
         if (id) node.properties.dataAtom = id;
+        if (node.tagName === 'pre' && diagramStarts.has(String(node.position?.start.offset))) node.properties.dataMermaid = String(node.position!.start.offset);
         // Remote images must never load merely because a model emitted Markdown.
         if (node.tagName === 'img') {
-          node.tagName = 'span'; node.children = [{ type:'text', value: `[图片：${node.properties.alt || 'image'}]` }];
-          delete node.properties.src; delete node.properties.alt;
+          let target = '';
+          try { target = decodeURIComponent(String(node.properties.src || '')); } catch { /* incomplete URL */ }
+          if (threadId && target && !/^[a-z][a-z\d+.-]*:/i.test(target) && !target.startsWith('//')) {
+            node.properties.src = '/api/files/image?' + new URLSearchParams({ threadId, target });
+            node.properties.title = target;
+          } else {
+            node.tagName = 'span'; node.children = [{ type:'text', value: `[图片：${node.properties.alt || 'image'}]` }];
+            delete node.properties.src; delete node.properties.alt;
+          }
         }
         if (node.tagName === 'a') {
           const href = String(node.properties.href || '');
           if (/^https?:\/\//i.test(href)) {try{new URL(href);node.properties.dataExternal=href;}catch{delete node.properties.href;}}
           else {
             delete node.properties.href;
-            if(href && !/^[a-z][a-z\d+.-]*:/i.test(href.replace(/:\d+(?::\d+)?$/,'')) && !href.startsWith('//')) {
-              node.properties.dataFile=href; node.properties.tabIndex=0;node.properties.role='button';
-              node.children.push({type:'element',tagName:'small',properties:{dataCopyIgnore:'',className:['link-target']},children:[{type:'text',value:' · '+href.split('/').at(-1)}]});
+            let target = '';
+            // HAST URLs are URI-encoded; file APIs and the clipboard take native paths.
+            try { target = decodeURIComponent(href); } catch { /* incomplete URL */ }
+            if(target && !/[\x00-\x1f\x7f]/.test(target) && !/^[a-z][a-z\d+.-]*:/i.test(target.replace(/:\d+(?::\d+)?$/,'')) && !target.startsWith('//')) {
+              node.properties.dataFile=target; node.properties.tabIndex=0;node.properties.role='button';
+              node.children.push({type:'element',tagName:'small',properties:{dataCopyIgnore:'',className:['link-target']},children:[{type:'text',value:' · '+target.split('/').at(-1)}]});
             }
           }
           if(node.properties.dataExternal)node.children.push({type:'element',tagName:'small',properties:{dataCopyIgnore:'',className:['link-target']},children:[{type:'text',value:' · '+new URL(href).hostname}]});
@@ -69,26 +114,42 @@ export function renderMarkdown(source: string): Rendered {
       }
     };
     walk(root);
-  }).use(rehypeSanitize, {
-    ...defaultSchema,
-    attributes: {
-      ...defaultSchema.attributes,
-      '*': [...(defaultSchema.attributes?.['*'] || []), 'dataAtom','dataCopyIgnore'],
-      a: [...(defaultSchema.attributes?.a || []), 'target', 'rel','dataFile','dataExternal','tabIndex','role'],
-      small:['className','dataCopyIgnore'],
-      code: [...(defaultSchema.attributes?.code || []), ['className', /^language-./, 'math-inline', 'math-display']],
-    },
-  }).use(highlightBlocks)
-    .use(rehypeKatex, { trust: false, throwOnError: false, maxExpand: 500 }).use(rehypeStringify);
+  }
   // Sanitize untrusted markup before the trusted KaTeX renderer adds its own MathML/styles.
-  const html = processor.stringify(processor.runSync(tree as MarkdownRoot));
-  return { html, atoms };
+  const clean = sanitizer.runSync(root);
+  const next = new Map<string, string>();
+  let cachedChars = 0;
+  // Resolve references across the whole document before caching sanitized blocks.
+  // ponytail: parsing still scans the full source; move it to a worker if long replies remain slow.
+  const html = clean.children.map(child => {
+    const key = JSON.stringify(child);
+    const part = cache.get(key) ?? formatter.stringify(formatter.runSync({ type: 'root', children: [child] }) as HtmlRoot);
+    if (cachedChars + key.length + part.length <= 2_000_000) {
+      next.set(key, part);
+      cachedChars += key.length + part.length;
+    }
+    return part;
+  }).join('');
+  cache.clear();
+  for (const [key, part] of next) cache.set(key, part);
+  return { html, atoms, diagrams };
 }
 
 const maps = new WeakMap<HTMLElement, Map<string,string>>();
-export function renderInto(el: HTMLElement, source: string) {
-  const rendered = renderMarkdown(source);
-  el.innerHTML = rendered.html; maps.set(el, rendered.atoms);
+export function renderInto(el: HTMLElement, rendered: Rendered, preserved = new Map<string, HTMLElement>()) {
+  const focused = document.activeElement;
+  const template = document.createElement('template'); template.innerHTML = rendered.html;
+  for (const slot of template.content.querySelectorAll<HTMLElement>('[data-mermaid]')) {
+    const existing = preserved.get(slot.dataset.mermaid!);
+    if (existing) slot.replaceWith(existing);
+  }
+  el.replaceChildren(template.content); maps.set(el, rendered.atoms);
+  if (focused instanceof HTMLElement && el.contains(focused) && focused !== document.activeElement) focused.focus({ preventScroll: true });
+  for (const img of el.querySelectorAll<HTMLImageElement>('img:not(.mermaid-image)')) img.addEventListener('error', () => {
+    const fallback = document.createElement('span'); fallback.dataset.atom = img.dataset.atom;
+    fallback.textContent = `图片无法读取：${img.alt || img.title}`; fallback.title = img.title;
+    img.replaceWith(fallback);
+  }, { once: true });
 }
 function overlaps(range: Range, node: Node | globalThis.Node): boolean {
   const r = document.createRange(); r.selectNodeContents(node as globalThis.Node);
@@ -129,7 +190,7 @@ export function selectedSource(range: Range, scope: HTMLElement): string {
 }
 
 export function installCopy(scope: HTMLElement) {
-  scope.addEventListener('copy', event => {
+  const copy = (event: ClipboardEvent) => {
     const target = event.target;
     if (target instanceof HTMLElement && target.closest('textarea,input,[contenteditable="true"]')) return;
     const selection = window.getSelection();
@@ -138,5 +199,7 @@ export function installCopy(scope: HTMLElement) {
     if (!scope.contains(range.startContainer) || !scope.contains(range.endContainer)) return;
     const text = selectedSource(range, scope);
     event.clipboardData.setData('text/plain',text); event.preventDefault();
-  });
+  };
+  scope.addEventListener('copy', copy);
+  return () => scope.removeEventListener('copy', copy);
 }

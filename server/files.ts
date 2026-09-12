@@ -3,8 +3,54 @@ import { constants } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
-import { HttpError, inside } from './security.ts';
+import os from 'node:os';
+import { HttpError, inside, imageMime } from './security.ts';
 const exec=promisify(execFile);
+
+export async function directoryPath(value: string) {
+  if (!value || value.length > 4096 || /[\x00-\x1f\x7f]/.test(value)) throw new HttpError(400, '无效目录路径');
+  if (value === '~' || value.startsWith('~/')) value = path.join(os.homedir(), value.slice(2));
+  if (/^(?:[a-z]:[\\/]|\\\\)/i.test(value)) {
+    try { value = (await exec('wslpath', ['-u', value], { timeout: 5000, maxBuffer: 16384 })).stdout.trim(); }
+    catch { throw new HttpError(400, '无法转换此 Windows 路径，请输入 WSL 路径'); }
+  }
+  if (!path.isAbsolute(value)) throw new HttpError(400, '请输入完整目录路径');
+  return value;
+}
+
+export async function pickDirectory(initial: string, signal?: AbortSignal): Promise<string | null> {
+  try {
+    const start = (await exec('wslpath', ['-w', initial], { timeout: 5000, maxBuffer: 16384, signal })).stdout.trim();
+    // Only base64-encoded data enters the fixed PowerShell script, never path syntax.
+    const script = `
+Add-Type -AssemblyName System.Windows.Forms
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$owner = New-Object System.Windows.Forms.Form
+$owner.TopMost = $true
+$owner.ShowInTaskbar = $false
+$owner.Opacity = 0
+$owner.Show()
+$owner.Activate()
+# Raise after the native modal loop starts, so the picker stays above the browser.
+$timer = New-Object System.Windows.Forms.Timer
+$timer.Interval = 300
+$timer.Add_Tick({ $owner.TopMost = $false; $owner.TopMost = $true; $owner.Activate(); $timer.Stop() })
+$timer.Start()
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+$dialog.Description = 'Select a project folder (Windows or WSL)'
+$dialog.ShowNewFolderButton = $false
+$dialog.SelectedPath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(start).toString('base64')}'))
+try { if ($dialog.ShowDialog($owner) -eq [Windows.Forms.DialogResult]::OK) { [Console]::Write($dialog.SelectedPath) } }
+finally { $timer.Dispose(); $dialog.Dispose(); $owner.Dispose() }
+`;
+    const { stdout } = await exec('powershell.exe', ['-NoProfile', '-STA', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { timeout: 120000, maxBuffer: 16384, signal });
+    return stdout.trim() || null;
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    throw new HttpError(502, '无法打开系统选择器，请使用下方目录列表或输入 WSL 路径');
+  }
+}
 
 export async function projectRoot(cwd:string, roots:string[]) {
   try { const {stdout}=await exec('git',['-C',cwd,'rev-parse','--show-toplevel'],{timeout:2000,maxBuffer:4096});
@@ -39,6 +85,23 @@ export async function previewFile(file:{path:string;line:number;column:number}) 
   const lines=text.split(/\r?\n/); if(file.line>lines.length)throw new HttpError(416,'行号超出当前文件范围');
   const start=Math.max(1,file.line-5);
   return {...file,start,totalLines:lines.length,lines:lines.slice(start-1,file.line+5)};
+}
+export async function imageFile(file: { path: string }) {
+  const handle = await open(file.path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const s = await handle.stat();
+    if (!s.isFile() || s.size > 25 * 1024 * 1024) throw new HttpError(413, '仅显示不超过 25 MiB 的图片');
+    const buffer = Buffer.alloc(s.size + 1); let size = 0;
+    while (size < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, size, buffer.length - size, null);
+      if (!bytesRead) break;
+      size += bytesRead;
+    }
+    if (size > s.size) throw new HttpError(409, '图片读取期间发生变化，请重试');
+    const data = buffer.subarray(0, size), mime = imageMime(data);
+    if (!mime) throw new HttpError(415, '仅支持 PNG、JPEG、WebP 图片');
+    return { data, mime };
+  } finally { await handle.close(); }
 }
 export async function openEditor(file:{path:string;line:number;column:number}) {
   await exec('code',['--reuse-window','--goto',`${file.path}:${file.line}:${file.column}`],{timeout:15000,maxBuffer:16384,shell:false});
