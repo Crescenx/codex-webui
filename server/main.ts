@@ -16,7 +16,7 @@ import { HttpError, secret, equal, inside, directory, bytes, Uploads } from './s
 import { projectRoot, localFile, previewFile, imageFile, openEditor, directoryPath, pickDirectory } from './files.ts';
 import { approvalChoices } from '../shared/approvals.ts';
 import { contextKey, contextModels, contextReason, readContextChoice, saveContextChoice } from './context.ts';
-import { Watchdogs, watchdogConfig, watchdogInput } from './watchdogs.ts';
+import { Watchdogs, watchdogConfig, watchdogInput, watchdogTimeZone } from './watchdogs.ts';
 import { watchdogLaunch } from './watchdog-mcp.ts';
 import type { Watchdog, WatchdogConfig, WatchdogReport, WatchdogRun } from '../shared/watchdogs.ts';
 
@@ -276,8 +276,8 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
     const t=threads.get(threadId);if(!t)throw new HttpError(403,'Watchdog 工具需要当前已打开的会话');await directory(t.cwd,roots);
     const args=object(b.arguments || {}), name=string(b.name);
     const active=watchdogs.activeForThread(threadId);
-    if(active && !['watchdog_report','watchdog_list'].includes(name))throw new HttpError(403,'定时检查只能报告结果，不能创建或修改监控任务');
-    if(name==='watchdog_list')return {data:watchdogs.list().filter(w=>w.threadId===threadId)};
+    if(active && !['watchdog_report','watchdog_list'].includes(name) && !(name==='watchdog_control' && args.action==='delete'))throw new HttpError(403,'定时检查期间不能创建或修改监控任务；仅允许按用户指令删除当前会话的任务');
+    if(name==='watchdog_list')return {data:watchdogs.list().filter(w=>w.threadId===threadId),timeZone:watchdogTimeZone()};
     if(name==='watchdog_report')return watchdogs.report(string(args.runId),threadId,{outcome:args.outcome,summary:args.summary} as WatchdogReport);
     if(name==='watchdog_create')return {watchdog:watchdogs.create(threadId,t.cwd,await validatedWatchdog(t,args))};
     const task=await authorizedWatchdog(string(args.id),threadId);
@@ -500,7 +500,7 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
       }
     }
     if(p==='/api/watchdogs' && req.method==='GET') {
-      const data:Watchdog[]=[];for(const w of watchdogs.list()) {try {await directory(w.cwd,roots);data.push(w);}catch{/* no access */}}return json(res,{data});
+      const data:Watchdog[]=[];for(const w of watchdogs.list()) {try {await directory(w.cwd,roots);data.push(w);}catch{/* no access */}}return json(res,{data,timeZone:watchdogTimeZone()});
     }
     if(p==='/api/watchdogs' && req.method==='POST') {const b=await body(req),t=await openThread(string(b.threadId));return json(res,{watchdog:watchdogs.create(t.id,t.cwd,await validatedWatchdog(t,b))});}
     const watchdogPath=/^\/api\/watchdogs\/([^/]+)(?:\/(runs))?$/.exec(p);

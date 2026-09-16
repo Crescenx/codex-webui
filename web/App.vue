@@ -14,7 +14,6 @@ import SubagentPanel from './components/SubagentPanel.vue';
 const store = createViewerStore(); provide(viewerKey, store);
 const { current, draft, approvals } = store;
 const folder = ref<InstanceType<typeof FolderDialog>>(), name = ref<InstanceType<typeof NameDialog>>(), skills = ref<InstanceType<typeof SkillsDialog>>();
-const watchdogs=ref<InstanceType<typeof WatchdogPanel>>();
 const error = computed(() => store.state.error || draft.value?.error || draft.value?.readError || (current.value?.turns?.at(-1)?.error ? JSON.stringify(current.value.turns.at(-1)!.error) : ''));
 const sidebarWidth = ref(280), sidebarCollapsed = ref(false), resizing = ref(false);
 const sidebarVisible = computed(() => !sidebarCollapsed.value);
@@ -38,10 +37,10 @@ onBeforeUnmount(() => { store.dispose(); window.removeEventListener('hashchange'
 </script>
 <template>
   <div class="viewer-layout" :class="{ 'sidebar-collapsed': !sidebarVisible, resizing }" :style="{ '--sidebar-width': sidebarWidth + 'px' }">
-  <Sidebar v-show="sidebarVisible" @new="folder?.show($event, !!$event)" @collapse="toggleSidebar" @watchdogs="watchdogs?.show()">
+  <Sidebar v-show="sidebarVisible" @new="folder?.show($event, !!$event)" @collapse="toggleSidebar">
     <div id="sidebar-resize" role="separator" tabindex="0" aria-label="调整侧栏宽度" aria-orientation="vertical" aria-controls="sidebar" :aria-valuenow="sidebarWidth" :aria-valuemin="240" :aria-valuemax="480" title="拖动调整宽度，双击恢复默认" @pointerdown="startResize" @pointermove="resize" @pointerup="($event.currentTarget as HTMLElement).releasePointerCapture($event.pointerId)" @lostpointercapture="resizing = false" @keydown="resizeKey" @dblclick="setWidth(280)"></div>
   </Sidebar>
-  <WatchdogPanel ref="watchdogs" />
+  <WatchdogPanel />
   <main>
     <header class="topbar"><button id="menu" class="quiet" aria-label="切换边栏" aria-controls="sidebar" :aria-expanded="sidebarVisible" @click="toggleSidebar">☰</button><div><h1 id="title">{{ current ? threadTitle(current) : '开始一个新任务' }}</h1><div id="cwd" class="subtle">{{ current?.cwd || '选择项目，让工作留在 WSL' }}</div></div><button id="rename" class="quiet" :hidden="!current" @click="name?.show()">重命名</button><span class="local-badge">LOCAL</span></header>
     <div id="error" role="alert" :hidden="!error">{{ error }}</div>

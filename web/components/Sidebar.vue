@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import { threadTitle, useViewer } from '../store.ts';
-const emit = defineEmits<{ new: [path?: string]; selected: []; collapse: []; watchdogs: [] }>();
+const emit = defineEmits<{ new: [path?: string]; selected: []; collapse: [] }>();
 const store = useViewer(), { threads } = store;
 const query = ref('');
 const logo = new URL('../assets/icon.png', import.meta.url).href;
@@ -22,7 +22,6 @@ async function notifications() { if ('Notification' in window) store.toast(await
   <aside id="sidebar" class="sidebar" aria-label="项目与会话">
     <div class="brand"><img class="brand-mark" :src="logo" alt="" width="36" height="36"><span>Codex <small>VIEWER</small></span><button id="sidebar-collapse" class="quiet" aria-label="收起侧栏" title="收起侧栏" @click="emit('collapse')">⇤</button></div>
     <button id="new" class="new-thread" :disabled="store.state.restarting || store.state.restartPending" @click="emit('new')">＋ 新任务</button>
-    <button id="watchdogs" class="quiet" @click="emit('watchdogs')">◷ Watchdogs <small>{{ store.state.watchdogs.filter(w=>w.state!=='deleted').length || '' }}</small></button>
     <label class="sr-only" for="search">搜索任务</label><input id="search" v-model="query" type="search" placeholder="搜索任务…">
     <div class="sidebar-heading"><span>项目</span><span>{{ groups.length }}</span></div>
     <nav id="threads" aria-label="任务列表">

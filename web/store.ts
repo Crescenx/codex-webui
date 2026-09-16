@@ -23,7 +23,7 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
     read: read<Record<string, number>>('viewer-read', {}), collapsed: read<Record<string, boolean>>('viewer-projects', {}),
     connection: '连接中', restarting: false, restartPending: false, error: '', toast: '',
     usage: { weekly: null, resetCount: null } as Usage, usageError: '',
-    watchdogs: [] as Watchdog[], watchdogError: '', targetTurn: '',
+    watchdogs: [] as Watchdog[], watchdogError: '', watchdogTimeZone: '', targetTurn: '',
     selectedAgentId: '', agentsVisible: false, agentsLoading: false, agentLoading: false, agentsError: '', agentError: '',
   });
   let alive = true, started = false, connectionGeneration = 0, selectionGeneration = 0;
@@ -207,8 +207,8 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
     return refresh('watchdogs', async () => {
       const job = begin('watchdogs');
       try {
-        const result = await client.request<{ data: Watchdog[] }>('/watchdogs', undefined, job.signal);
-        if (job.valid()) { state.watchdogs = result.data; state.watchdogError = ''; }
+        const result = await client.request<{ data: Watchdog[]; timeZone: string }>('/watchdogs', undefined, job.signal);
+        if (job.valid()) { state.watchdogs = result.data; state.watchdogTimeZone = result.timeZone; state.watchdogError = ''; }
       } catch (e) { if (job.valid()) state.watchdogError = message(e); }
     }, changed);
   }

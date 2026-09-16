@@ -1083,20 +1083,26 @@ dialog::backdrop {
 .watchdog-chip strong { font-size: 13px; }
 .watchdog-compact { flex: 0 0 auto; }.watchdog-compact .watchdog-actions { gap: 2px; }.watchdog-compact .watchdog-actions button { padding: 2px 8px; }
 .watchdog-chip span { color: var(--text-secondary); }
-.watchdog-last { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; white-space: normal; }
 #watchdog-dialog { width: min(800px, 94vw); max-height: 90dvh; overflow-y: auto; }
 .watchdog-toolbar, .watchdog-actions, .watchdog-heading { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .watchdog-toolbar { margin: 16px 0; }
 .watchdog-heading { justify-content: space-between; }
 .watchdog-card { border: 1px solid var(--border-subtle); border-radius: 10px; padding: 16px; margin-top: 12px; overflow-wrap: anywhere; }
 .watchdog-card p { margin: 8px 0; white-space: pre-wrap; }
-.watchdog-card pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 300px; overflow: auto; }
-.watchdog-thread { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; margin: 8px 0; text-align: left; }
+.watchdog-prompt { margin: 12px 0; font-size: 13px; line-height: 1.65; }
+.watchdog-prompt > summary { list-style: none; }
+.watchdog-prompt > summary::-webkit-details-marker { display: none; }
+.watchdog-prompt-preview { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-wrap; color: var(--text-primary); font-weight: 400; }
+.prompt-expand, .prompt-collapse { font-size: 11px; color: var(--text-secondary); }
+.watchdog-prompt:not([open]) .prompt-collapse, .watchdog-prompt[open] .prompt-expand, .watchdog-prompt[open] .watchdog-prompt-preview { display: none; }
 .watchdog-actions button { font-size: 12px; }
 .watchdog-form label { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; min-width: 0; }
 .watchdog-form input, .watchdog-form textarea, .watchdog-form select { width: 100%; min-width: 0; }
 .watchdog-form textarea { resize: vertical; font-family: var(--font-mono); font-size: 13px; }
 .watchdog-form .watchdog-toolbar label { flex: 1; margin: 0; }
+.watchdog-weekdays { display: flex; gap: 18px; border: 1px solid var(--border-medium); border-radius: 8px; padding: 12px; }
+.watchdog-form .watchdog-weekdays label { flex-direction: row; align-items: center; margin: 0; }
+.watchdog-form .watchdog-weekdays input { width: auto; }
 .message.target-turn { border-left: 2px solid var(--accent-primary); }
 
 
