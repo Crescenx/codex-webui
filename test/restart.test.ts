@@ -32,8 +32,15 @@ test('restart replaces the process once, preserves launch options, and can recov
 test('restart checks authorization, all native threads, in-flight requests, and saved history before replacing Codex', async () => {
   const dir = await mkdtemp('/tmp/viewer-restart-server-');
   const stateFile = path.join(dir, 'state.json');
-  const adapter = new AppServer({ command: process.execPath, args: [path.resolve('test/fake-codex.ts')], env: { ...process.env, VIEWER_FAKE_STATE: stateFile } });
-  const app = await serve({ roots: [dir], dataDir: dir + '/data', runtimeDir: dir + '/run', port: 0, adapter });
+  const makeAdapter = () => new AppServer({ command: process.execPath, args: [path.resolve('test/fake-codex.ts')], env: { ...process.env, VIEWER_FAKE_STATE: stateFile } });
+  let adapter = makeAdapter();
+  let app: Awaited<ReturnType<typeof serve>>;
+  let restartFailure = false;
+  const launch = () => serve({ roots: [dir], dataDir: dir + '/data', runtimeDir: dir + '/run', port: 0, adapter, restart: async state => {
+    if (restartFailure) throw new Error('replacement failed');
+    await app.stop(); adapter = makeAdapter(); process.env.VIEWER_RESTART_STATE = state; app = await launch();
+  } });
+  app = await launch();
   let release = () => {};
   try {
     await adapter.start();
@@ -68,18 +75,24 @@ test('restart checks authorization, all native threads, in-flight requests, and 
     while (held) await new Promise(resolve => setImmediate(resolve));
     assert.equal((await post('/restart')).status, 409);
     assert.equal((await post(`/threads/${thread.id}/turns`, { text: 'must not run', attachments: [] })).status, 409);
-    release(); assert.equal((await restarting).status, 200);
+    release(); assert.equal((await restarting).status, 202);
+    for (let i = 0; i < 100 && (!adapter.child || adapter.child.pid === pid); i++) await new Promise(resolve => setTimeout(resolve, 20));
     assert.notEqual(adapter.child!.pid, pid);
     assert.equal((await post(`/threads/${hidden.id}/open`)).status, 200);
     const restored = await (await post(`/threads/${thread.id}/open`)).json();
     assert.equal(restored.thread.id, thread.id); assert.equal(restored.thread.turns.length, 0);
     const saved = JSON.parse(await readFile(stateFile, 'utf8'));
     assert.equal(saved.threads.find((t: Thread) => t.id === hidden.id).turns.length, 1);
+    const replacementCall = adapter.call.bind(adapter);
     adapter.call = async (method, params = {}) => {
       if (method === 'thread/read') throw new Error('no rollout found');
-      return call(method, params);
+      return replacementCall(method, params);
     };
     const replacement = adapter.child!.pid;
     assert.equal((await post('/restart')).status, 409); assert.equal(adapter.child!.pid, replacement);
+    adapter.call = replacementCall; restartFailure = true;
+    assert.equal((await post('/restart')).status, 202);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal((await post(`/threads/${hidden.id}/open`)).status, 200);
   } finally { release(); await app.stop(); await rm(dir, { recursive: true, force: true }); }
 });

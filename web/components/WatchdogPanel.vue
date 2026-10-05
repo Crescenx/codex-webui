@@ -6,6 +6,8 @@ import type { Model } from '../../shared/protocol.ts';
 import type { Watchdog, WatchdogConfig } from '../../shared/watchdogs.ts';
 import { watchdogLabels } from '../../shared/watchdogs.ts';
 const store=useViewer(), dialog=ref<HTMLDialogElement>(), view=ref<'list'|'edit'>('list');
+const props = defineProps<{ expanded: boolean }>();
+const emit = defineEmits<{ close: [] }>();
 const error=ref(''), saving=ref(false), editing=ref<Watchdog>(), catalog=ref<Model[]>([]);
 const threadId=ref(''), name=ref(''), prompt=ref(''), interval=ref(1), unit=ref(60), model=ref(''), effort=ref<string|null>(null);
 const timing=ref<'interval'|'daily'|'days'|'weekly'|'once'>('interval'), everyDays=ref(2), startDate=ref(''), time=ref('09:00'), at=ref(''), weekdays=ref<number[]>([1]);
@@ -13,10 +15,6 @@ const weekLabels = ['一','二','三','四','五','六','日'];
 const timeZone = computed(() => store.state.watchdogTimeZone);
 let generation=0;
 const currentTasks=computed(()=>store.state.watchdogs.filter(w=>w.threadId===store.state.currentId && w.state!=='deleted'));
-const preference = ref<boolean | null>(null);
-try { const saved = localStorage.getItem('viewer-watchdogs-collapsed'); if (saved !== null) preference.value = saved === 'true'; } catch {}
-const expanded = computed(() => preference.value === null ? currentTasks.value.length > 0 : !preference.value);
-function toggle() { preference.value = expanded.value; try { localStorage.setItem('viewer-watchdogs-collapsed', String(preference.value)); } catch {} }
 const efforts=computed(()=>catalog.value.find(m=>m.model===model.value)?.supportedReasoningEfforts || []);
 const date=(n:number|null)=>n===null?'—':new Date(n).toLocaleString(undefined,{timeZone:timeZone.value || undefined,year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
 function frequency(w: DeepReadonly<Watchdog>) {
@@ -142,10 +140,9 @@ onBeforeUnmount(() => resetView());
 function modelChanged() {effort.value=catalog.value.find(m=>m.model===model.value)?.defaultReasoningEffort || null;}
 </script>
 <template>
-  <aside id="watchdog-rail" class="context-rail watchdog-rail" :class="{ 'rail-collapsed': !expanded }" aria-label="当前会话的 Watchdogs">
-    <button v-if="!expanded" class="rail-tab quiet" aria-label="展开 Watchdogs" :aria-expanded="false" @click="toggle">Watchdogs · {{ currentTasks.length }}</button>
-    <template v-else>
-    <header class="rail-header"><div><strong>Watchdogs</strong><span class="subtle">{{ currentTasks.length }} 个</span></div><button class="quiet" aria-label="新建 Watchdog" :disabled="!store.state.currentId || saving" @click="edit()">＋</button><button class="quiet" aria-label="收起 Watchdogs" :aria-expanded="true" @click="toggle">‹</button></header>
+  <aside v-show="props.expanded" id="watchdog-rail" class="context-rail watchdog-rail" aria-label="当前会话的 Watchdogs">
+    <template v-if="props.expanded">
+    <header class="rail-header"><div><strong>Watchdogs</strong><span class="subtle">{{ currentTasks.length }} 个</span></div><button class="quiet" aria-label="新建 Watchdog" :disabled="!store.state.currentId || saving" @click="edit()">＋</button><button class="quiet" aria-label="收起 Watchdogs" @click="emit('close')">关闭</button></header>
     <section class="watchdog-strip">
     <p v-if="!currentTasks.length" class="subtle">当前会话没有 Watchdog</p>
     <div v-for="w in currentTasks" :key="w.id" class="watchdog-compact"><button class="watchdog-chip" @click="show()"><strong>◷ {{ w.name }}</strong><span>{{ status(w) }} · {{ frequency(w) }}</span><span>下次 {{ date(w.nextRunAt) }} · {{ timeZone }}</span></button><div class="watchdog-actions"><button class="quiet" :disabled="saving" :aria-label="'编辑 '+w.name" @click="edit(w)">编辑</button><button class="quiet" :disabled="saving" :aria-label="(w.state==='enabled'?'暂停 ':'启用 ')+w.name" @click="control(w,w.state==='enabled'?'pause':'resume')">{{ w.state==='enabled'?'暂停':'启用' }}</button></div></div>
@@ -153,9 +150,8 @@ function modelChanged() {effort.value=catalog.value.find(m=>m.model===model.valu
     <button class="quiet rail-manage" :disabled="!store.state.currentId" @click="show()">管理 Watchdogs</button>
     </template>
   </aside>
-  <dialog ref="dialog" id="watchdog-dialog" aria-labelledby="watchdog-title" @close="!dialog?.open && resetView()" @cancel.prevent="close">
-    <button class="quiet close" aria-label="关闭 Watchdogs" @click="close">✕</button>
-    <h2 id="watchdog-title">{{ view==='edit'?(editing?'编辑 Watchdog':'新建 Watchdog'):'Watchdogs' }}</h2>
+  <dialog ref="dialog" id="watchdog-dialog" class="workspace-dialog" aria-labelledby="watchdog-title" @close="!dialog?.open && resetView()" @cancel.prevent="close">
+    <header class="dialog-header"><h2 id="watchdog-title">{{ view==='edit'?(editing?'编辑 Watchdog':'新建 Watchdog'):'Watchdogs' }}</h2><button class="quiet" aria-label="关闭 Watchdogs" @click="close">关闭</button></header><div class="dialog-body">
     <p class="subtle">关闭浏览器后仍会按计划检查。需要后台服务和电脑保持运行；会话忙碌时等待空闲。</p>
     <p class="subtle">定时时区：{{ timeZone || '加载中…' }} · 错过多个时刻只补执行一次。</p>
     <p v-if="error || store.state.watchdogError" role="alert">{{ error || store.state.watchdogError }}</p>
@@ -187,7 +183,8 @@ function modelChanged() {effort.value=catalog.value.find(m=>m.model===model.valu
       </template>
       <div class="watchdog-toolbar"><label>模型<select v-model="model" aria-label="模型" required @change="modelChanged"><option v-if="model && !catalog.some(m=>m.model===model)" :value="model">{{ model }}</option><option v-for="m in catalog" :key="m.model" :value="m.model">{{ m.displayName }}</option></select></label><label>思考强度<select v-model="effort" aria-label="思考强度"><option :value="null">默认</option><option v-for="e in efforts" :key="e.reasoningEffort" :value="e.reasoningEffort">{{ e.reasoningEffort }}</option></select></label></div>
       <p class="subtle">{{ timing==='interval'?'首次检查在一个间隔后开始。':timing==='once'?'单次任务成功执行后结束；再次执行请修改时间后启用，或使用立即检查。':'按所选日期和时刻执行；立即检查不改变原时间表。' }}运行中的检查保留原指令，修改用于后续检查。暂停或删除仅停止后续调度；要停止当前检查，请使用对话中的停止按钮。</p>
-      <div class="dialog-actions"><button type="button" :disabled="saving" @click="resetView()">返回</button><button type="submit" class="primary" :disabled="saving || !model">{{ saving?'保存中…':'保存并'+(editing?'更新':'启用') }}</button></div>
+      <div class="dialog-actions watchdog-save-actions"><button type="button" :disabled="saving" @click="resetView()">返回</button><button type="submit" class="primary" :disabled="saving || !model">{{ saving?'保存中…':'保存并'+(editing?'更新':'启用') }}</button></div>
     </form>
+    </div>
   </dialog>
 </template>

@@ -1,7 +1,23 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import { useViewer } from '../store.ts';
 const store = useViewer();
+const dialog = ref<HTMLDialogElement>(), loading = ref(false), error = ref(''), result = ref('');
+const unavailable = computed(() => store.state.connection !== '已连接' || store.state.restarting || store.state.restartPending || store.state.usageResetPending);
+const canReset = computed(() => !unavailable.value && !loading.value && (!!store.state.usageResetKey || (store.state.usage.resetCount ?? 0) > 0));
+async function showReset() {
+  error.value = ''; result.value = ''; loading.value = true;
+  dialog.value?.showModal();
+  try { await store.loadUsage(true); } finally { loading.value = false; }
+}
+async function reset() {
+  if (!canReset.value || result.value) return;
+  error.value = '';
+  try {
+    const outcome = await store.resetUsage();
+    if (outcome) result.value = { reset: '额度已重置。', nothingToReset: '当前额度无需重置。', noCredit: '当前没有可用的重置卡。', alreadyRedeemed: '本次请求对应的重置卡已使用。' }[outcome];
+  } catch (e) { error.value = (e instanceof Error ? e.message : String(e)) + '。请先核对额度；重试会沿用本次请求，不会另开一次重置。'; }
+}
 const percent = (used: number, total = 100) => Math.round(Math.max(0, Math.min(100, (1 - used / total) * 100))) + '%';
 const context = computed(() => {
   const usage = store.current.value?.tokenUsage, used = usage?.last?.totalTokens, total = usage?.modelContextWindow;
@@ -21,5 +37,20 @@ const weeklyTitle = computed(() => {
     <span :title="context.title">Context left <b>{{ context.left }}</b></span>
     <span :title="weeklyTitle">Weekly left <b>{{ weekly ? percent(weekly.usedPercent) : '—' }}</b></span>
     <span :title="store.state.usageError || '剩余可用额度重置次数'">Resets <b>{{ store.state.usage.resetCount ?? '—' }}</b></span>
+    <button id="reset-usage" class="quiet" :disabled="unavailable" @click="showReset">重置额度</button>
   </div>
+  <dialog id="usage-reset-dialog" class="workspace-dialog" ref="dialog" aria-labelledby="usage-reset-title" aria-describedby="usage-reset-description" @cancel="store.state.usageResetPending && $event.preventDefault()">
+    <header class="dialog-header"><h2 id="usage-reset-title">使用重置卡</h2></header><div class="dialog-body">
+    <p id="usage-reset-description">确认使用 1 张重置卡，重置当前账户的 Codex 使用额度？</p>
+    <p>剩余重置卡：<strong>{{ loading ? '读取中…' : store.state.usage.resetCount ?? '未知' }}</strong></p>
+    <p class="subtle">重置作用于账户额度，保留对话历史、草稿和项目文件。</p>
+    <p v-if="store.state.usageResetKey && !store.state.usageResetPending" class="subtle">上次请求尚未确认，再次确认只会重试同一次重置。</p>
+    <p v-if="store.state.usageError" role="status">{{ store.state.usageError }}</p>
+    <p v-if="error" role="alert">{{ error }}</p>
+    <p v-if="result" role="status">{{ result }}</p>
+    </div><div class="dialog-actions">
+      <button id="usage-reset-cancel" class="quiet" autofocus :disabled="store.state.usageResetPending" @click="dialog?.close()">{{ result ? '关闭' : '取消' }}</button>
+      <button v-if="!result" id="usage-reset-confirm" class="primary" :disabled="!canReset" @click="reset">{{ store.state.usageResetPending ? '正在重置…' : store.state.usageResetKey ? '重试本次重置' : '确认使用 1 张重置卡' }}</button>
+    </div>
+  </dialog>
 </template>

@@ -3,12 +3,14 @@ import { computed, ref, watch } from 'vue';
 import type { Item, Turn } from '../../shared/protocol.ts';
 import { activity } from '../activity.ts';
 import { highlightInto, outputText } from '../highlight.ts';
-const props = defineProps<{ item: Item; turn: Turn }>();
+import FileChangeBlock from './FileChangeBlock.vue';
+import type { ItemView } from '../transcript.ts';
+const props = defineProps<{ item: Item; turn: Turn; cwd?: string; view: ItemView }>();
 const emit = defineEmits<{ copy: [text: string] }>();
 const info = computed(() => activity(props.item, props.turn));
 const command = computed(() => props.item.type === 'commandExecution');
 const expandable = computed(() => !!info.value.detail || (command.value && !!info.value.subject));
-const open = ref(false), subject = ref<HTMLElement>(), commandCode = ref<HTMLElement>(), output = ref<HTMLElement>(), now = ref(Date.now());
+const open = computed({ get: () => props.view.open, set: value => { props.view.open = value; } }), subject = ref<HTMLElement>(), commandCode = ref<HTMLElement>(), output = ref<HTMLElement>(), now = ref(Date.now());
 watch(() => info.value.state, (state, _, cleanup) => {
   if (state !== 'running') return;
   const timer = setInterval(() => { now.value = Date.now(); }, 1000);
@@ -23,7 +25,8 @@ watch([subject, commandCode, output, open, info], () => {
 const labels: Record<string, string> = { running: '进行中', completed: '已完成', failed: '失败', cancelled: '已取消', unknown: '状态未知' };
 </script>
 <template>
-  <component :is="expandable ? 'details' : 'div'" class="activity" :class="info.state" :data-kind="item.type" :open="expandable ? open : undefined" @toggle="open = ($event.target as HTMLDetailsElement).open">
+  <FileChangeBlock v-if="item.type === 'fileChange'" :item="item" :turn="turn" :cwd="cwd" :view="view" @copy="emit('copy', $event)" />
+  <component v-else :is="expandable ? 'details' : 'div'" class="activity" :class="info.state" :data-kind="item.type" :open="expandable ? open : undefined" @toggle="open = ($event.target as HTMLDetailsElement).open">
     <component :is="expandable ? 'summary' : 'div'" class="activity-title"><span class="activity-label">{{ info.label }}</span><code v-if="command && info.subject" ref="subject" class="activity-command" :title="info.subject"></code><span v-else-if="info.subject" class="activity-subject" :title="info.subject">{{ info.subject }}</span><span class="activity-state">{{ labels[info.state] || info.state }}</span><time v-if="info.state === 'running' && item.startedAt" :data-since="item.startedAt"> {{ Math.max(0, Math.floor((now - item.startedAt) / 1000)) }}s</time></component>
     <template v-if="command">
       <pre v-if="info.subject" class="activity-command-full"><div class="code-toolbar" data-copy-ignore><span>命令</span><button type="button" class="quiet" @click="emit('copy', item.command || '')">复制命令</button></div><code ref="commandCode"></code></pre>

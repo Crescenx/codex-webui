@@ -114,6 +114,23 @@ test('bracket math uses KaTeX while retaining original delimiters and source pos
   for(const source of [formulas[2],formulas[3]])for(let end=2;end<=source.length;end++)assert.doesNotThrow(()=>renderMarkdown(source.slice(0,end)));
   for(const source of [formulas[2]+'  ',formulas[2]+' 后续中文','- '+formulas[2].replaceAll('\n','\n  ')])assert.match(renderMarkdown(source).html,/class="katex"/);
 });
+test('display math after prose shields equation lines from Markdown headings', () => {
+  const formula = '\\[\n\\max_{a,b} \\operatorname{Corr}(Xa,Yb)\n=\n\\frac{a^T(X^TY)b}{\\|Xa\\|_2\\,\\|Yb\\|_2}\n\\]';
+  for (const prefix of ['', '> ', '- ']) {
+    const continuation = prefix === '- ' ? '  ' : prefix;
+    const source = prefix + '寻找第一对典型变量：\n' + continuation + formula.replaceAll('\n', '\n' + continuation) + '\n' + continuation + '后续正文。';
+    const rendered = renderMarkdown(source);
+    assert.doesNotMatch(rendered.html, /<h[12]|katex-error/);
+    assert.match(rendered.html, /katex-display/);
+    assert.ok([...rendered.atoms.values()].some(raw => raw.includes('\\max_{a,b}')));
+  }
+  assert.match(renderMarkdown('正常标题\n=').html, /<h1>正常标题<\/h1>/);
+  assert.match(renderMarkdown('正常标题\n---').html, /<h2>正常标题<\/h2>/);
+  for (let end = 2; end <= formula.length; end++) {
+    assert.doesNotMatch(renderMarkdown('正文\n' + formula.slice(0, end)).html, /<h[12]/);
+  }
+});
+
 test('bracket delimiters do not alter code, URLs, ordinary escapes or incomplete streaming math',()=>{
   const literals=[String.raw`\[x\]`,String.raw`\(x\)`];
   for(const literal of literals)for(const code of ['`'+literal+'`','```python\n'+literal+'\n```','    '+literal]) {

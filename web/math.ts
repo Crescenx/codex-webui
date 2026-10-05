@@ -7,6 +7,7 @@ declare module 'micromark-util-types' {
     viewerMath: 'viewerMath';
     viewerMathFlow: 'viewerMathFlow';
     viewerMathPending: 'viewerMathPending';
+    viewerMathFlowPending: 'viewerMathFlowPending';
     viewerMathData: 'viewerMathData';
   }
 }
@@ -19,7 +20,7 @@ const codeFence:Construct={partial:true,tokenize(effects,ok,nok){
 }};
 function construct(flow:boolean):Construct {
   const tokenize:Tokenizer=function(effects,ok,nok) {
-    if(flow && this.interrupt)return nok;
+    // Closed display math can interrupt prose: its '=' lines are not Setext headings.
     let token:Token;let close:number;let count=0;
     let dataOpen=false;
     const consume=(code:number)=>{count++;if(!dataOpen){effects.enter('viewerMathData');dataOpen=true;}effects.consume(code);};
@@ -34,8 +35,8 @@ function construct(flow:boolean):Construct {
     const body:State=code=>{
       // ponytail: bound delimiter lookahead; oversized/unclosed input remains plain text.
       if(code===null || count>=32768) {
-        if(flow)return nok(code);
-        flush();token.type='viewerMathPending';effects.exit(token.type);return ok(code);
+        if(flow && code!==null)return nok(code);
+        flush();token.type=flow?'viewerMathFlowPending':'viewerMathPending';effects.exit(token.type);return ok(code);
       }
       if(lineEnding(code)){count++;flush();effects.enter('lineEnding');effects.consume(code);effects.exit('lineEnding');return flow?lineStart:body;}
       consume(code);return code===92?escape:body;
@@ -69,6 +70,7 @@ export function remarkBracketMath(this:Processor) {
   (data.micromarkExtensions??=[]).push({flow:{92:construct(true)},text:{92:construct(false)}});
   const enter:Handle=function(token) {
     const raw=this.sliceSerialize(token);
+    if(token.type==='viewerMathFlowPending') {this.enter({type:'paragraph',children:[{type:'text',value:raw}]},token);this.buffer();return;}
     if(token.type==='viewerMathPending') {this.enter({type:'text',value:raw},token);this.buffer();return;}
     const value=raw.slice(2,-2).trim();const display=raw[1]==='[';
     const code={type:'element' as const,tagName:'code',properties:{className:['language-math',display?'math-display':'math-inline']},children:[{type:'text' as const,value}]};
@@ -78,6 +80,6 @@ export function remarkBracketMath(this:Processor) {
     this.buffer();
   };
   const exit:Handle=function(token){this.resume();this.exit(token);};
-  const extension:Extension={enter:{viewerMath:enter,viewerMathFlow:enter,viewerMathPending:enter},exit:{viewerMath:exit,viewerMathFlow:exit,viewerMathPending:exit}};
+  const extension:Extension={enter:{viewerMath:enter,viewerMathFlow:enter,viewerMathPending:enter,viewerMathFlowPending:enter},exit:{viewerMath:exit,viewerMathFlow:exit,viewerMathPending:exit,viewerMathFlowPending:exit}};
   (data.fromMarkdownExtensions??=[]).push(extension);
 }

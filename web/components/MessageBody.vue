@@ -2,10 +2,12 @@
 import { inject, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { renderInto, renderMarkdown } from '../render.ts';
 import { mermaidKey, type DiagramView } from '../mermaid.ts';
-const props = defineProps<{ source: string; markdown: boolean; threadId?: string; complete?: boolean }>();
+import { transcriptMemoryKey } from '../transcript.ts';
+const props = defineProps<{ source: string; markdown: boolean; threadId?: string; itemKey?: string; complete?: boolean }>();
 const emit = defineEmits<{ copy: [text: string]; layout: [] }>();
 const body = ref<HTMLElement>();
 const mermaid = inject(mermaidKey)!;
+const memory = inject(transcriptMemoryKey);
 const diagrams = new Map<string, DiagramView>();
 const cache = new Map<string, string>();
 let timer: ReturnType<typeof setTimeout> | undefined, nextRenderAt = 0, pending = false;
@@ -15,11 +17,11 @@ function paint() {
   timer = undefined;
   if (!body.value) return;
   const selection = getSelection();
-  if (selection && !selection.isCollapsed && selection.anchorNode && body.value.closest('#conversation')?.contains(selection.anchorNode)) return;
+  if (selection && !selection.isCollapsed && selection.anchorNode && body.value.closest('.conversation')?.contains(selection.anchorNode)) return;
   pending = false;
   if (!props.markdown) { clear(); body.value.textContent = props.source; emit('layout'); return; }
   const startedAt = performance.now();
-  const rendered = renderMarkdown(props.source, props.threadId, cache);
+  const rendered = memory && props.itemKey ? memory.render(props.itemKey, props.source, props.threadId, cache, !!props.complete) : renderMarkdown(props.source, props.threadId, cache);
   for (const [id, view] of diagrams) {
     if (!rendered.diagrams.some(block => block.id === id && block.source === view.source)) { view.dispose(); diagrams.delete(id); }
   }

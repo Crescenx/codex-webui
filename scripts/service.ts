@@ -8,7 +8,8 @@ const project = fileURLToPath(new URL('..',import.meta.url));
 if (/[\r\n]/.test(project)) throw new Error('The service project path cannot contain line breaks');
 const root = path.resolve(process.argv[2] || path.join(os.homedir(),'projects'));
 const quote = (s:string) => '"'+s.replaceAll('\\','\\\\').replaceAll('"','\\"').replaceAll('%','%%').replaceAll('\n','\\n')+'"';
-const environment = ['PATH','CODEX_HOME','XDG_DATA_HOME','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY','http_proxy','https_proxy','all_proxy','no_proxy']
+// WSL_INTEROP is a per-session socket; only persist the distro and environment forwarding rules.
+const environment = ['PATH','CODEX_HOME','XDG_DATA_HOME','WSL_DISTRO_NAME','WSLENV','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY','http_proxy','https_proxy','all_proxy','no_proxy']
   .filter(key => process.env[key] !== undefined).map(key => `Environment=${quote(key+'='+process.env[key])}`).join('\n');
 const dir = path.join(os.homedir(),'.config/systemd/user');
 await mkdir(dir,{recursive:true});

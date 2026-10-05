@@ -1,15 +1,20 @@
 import { computed, inject, reactive, readonly } from 'vue';
 import type { DeepReadonly, InjectionKey } from 'vue';
-import { messageReceived, mergeThreadMetadata, reduceNotice, threadTitle, usageFrom } from '../shared/protocol.ts';
-import type { Item, NewThreadOptions, PendingRequest, Settings, Skill, Thread, Turn, Usage } from '../shared/protocol.ts';
+import { messageReceived, mergeThreadMetadata, reduceNotice, threadTitle, usageFrom, goalLabels } from '../shared/protocol.ts';
+import type { GoalUpdate, Item, NewThreadOptions, PendingRequest, Settings, Skill, Thread, Turn, Usage, UsageResetOutcome } from '../shared/protocol.ts';
 import { createClient } from './api.ts';
 import type { Attachment, Catalog, Directories, Preview, Snapshot, Update } from './api.ts';
 import type { Watchdog, WatchdogConfig, WatchdogRun } from '../shared/watchdogs.ts';
 import { agentTree, mergeAgentHistory } from '../shared/agents.ts';
+import { appContextLimit, appPath } from '../shared/mcp-apps.ts';
+import type { AppContext, AppContextInput, AppDescription, AppTarget, AppView } from '../shared/mcp-apps.ts';
+import type { Obj } from '../shared/protocol.ts';
 
 const emptyCatalog = (): Catalog => ({ models: [], modes: [], skills: [], errors: {}, skillErrors: [] });
 type QueuedMessage = { id: string; turnId: string; text: string; attachments: Attachment[]; skills: Skill[]; forwardedAs?: string[] };
-type Draft = { text: string; attachments: Attachment[]; skills: Skill[]; queued: QueuedMessage[]; answers: Record<string, string[]>; desired?: Settings; dirty: boolean; catalog: Catalog; loading: boolean; sending: boolean; stopping: boolean; uploading: boolean; uncertain: boolean; error: string; readError: string };
+type Draft = { text: string; attachments: Attachment[]; skills: Skill[]; queued: QueuedMessage[]; answers: Record<string, string[]>; desired?: Settings; dirty: boolean; catalog: Catalog; loading: boolean; sending: boolean; stopping: boolean; uploading: boolean; goalSaving: boolean; uncertain: boolean; error: string; readError: string };
+type ReloadDraft = Pick<Draft, 'text' | 'attachments' | 'skills' | 'queued' | 'answers' | 'desired' | 'dirty' | 'uncertain'>;
+const reloadKey = 'viewer-restart-drafts-v1';
 const message = (e: unknown) => e instanceof Error ? e.message : String(e);
 const questionPrefix = (item: DeepReadonly<Pick<Item, 'questions'>>) => '回答 Codex 提问：\n' + (item.questions || []).map((q, i) => `${i + 1}. ${q.title}`).join('\n') + '\n\n';
 
@@ -21,13 +26,15 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
     revisions: {} as Record<string, number>,
     drafts: {} as Record<string, Draft>, requests: {} as Record<string, PendingRequest>, replying: {} as Record<string, boolean>,
     read: read<Record<string, number>>('viewer-read', {}), collapsed: read<Record<string, boolean>>('viewer-projects', {}),
-    connection: '连接中', restarting: false, restartPending: false, error: '', toast: '',
-    usage: { weekly: null, resetCount: null } as Usage, usageError: '',
+    connection: '连接中', restarting: false, restartPending: false, authExpired: false, error: '', toast: '',
+    listLoading: false, moreLoading: false, listError: '',
+    usage: { weekly: null, resetCount: null } as Usage, usageError: '', usageResetPending: false, usageResetKey: read<string>('viewer-usage-reset-key', ''),
     watchdogs: [] as Watchdog[], watchdogError: '', watchdogTimeZone: '', targetTurn: '',
     selectedAgentId: '', agentsVisible: false, agentsLoading: false, agentLoading: false, agentsError: '', agentError: '',
   });
   let alive = true, started = false, connectionGeneration = 0, selectionGeneration = 0;
   let targetId = '', epoch = '', lastSeq = -1;
+  let restartEpoch = '', restartTimer: ReturnType<typeof setTimeout> | undefined;
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
   let usageTimer: ReturnType<typeof setInterval> | undefined, usageRevision = 0;
   let agentTimer: ReturnType<typeof setInterval> | undefined;
@@ -35,6 +42,7 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
   const snapshots = new Map<string, number>();
   const syncing = new Map<string, Update[]>();
   const notified = new Set<string>();
+  const appContexts = new Map<string, Map<string, AppContextInput>>();
   let listLoaded = false;
   const refreshes = new Map<string, { running: boolean; dirty: boolean; promise: Promise<void> }>();
   function refresh(scope: string, read: () => Promise<void>, changed = false): Promise<void> {
@@ -65,10 +73,20 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
     if (!state.drafts[id]) {
       const desired = read<Settings | undefined>('viewer-settings:' + id, undefined);
       let text = ''; try { text = storage.getItem('viewer-draft:' + id) || ''; } catch {}
-      state.drafts[id] = { text, attachments: [], skills: [], queued: read<QueuedMessage[]>('viewer-queued:' + id, []), answers: read<Record<string, string[]>>('viewer-answers:' + id, {}), desired, dirty: !!desired, catalog: emptyCatalog(), loading: false, sending: false, stopping: false, uploading: false, uncertain: false, error: '', readError: '' };
+      state.drafts[id] = { text, attachments: [], skills: [], queued: read<QueuedMessage[]>('viewer-queued:' + id, []), answers: read<Record<string, string[]>>('viewer-answers:' + id, {}), desired, dirty: !!desired, catalog: emptyCatalog(), loading: false, sending: false, stopping: false, uploading: false, goalSaving: false, uncertain: false, error: '', readError: '' };
     }
     return state.drafts[id];
   }
+  let pageRestored = false;
+  try {
+    const saved = window.sessionStorage.getItem(reloadKey);
+    if (saved) {
+      const drafts = JSON.parse(saved) as Record<string, ReloadDraft>;
+      for (const [id, draft] of Object.entries(drafts)) Object.assign(draftFor(id), draft);
+      window.sessionStorage.removeItem(reloadKey);
+      pageRestored = true;
+    }
+  } catch { /* Browser storage can be unavailable; keep the existing drafts. */ }
   const current = computed(() => state.entities[state.currentId]);
   const draft = computed(() => state.drafts[state.currentId]);
   const threads = computed(() => state.ids.map(id => state.entities[id]).filter((t): t is Thread => !!t));
@@ -87,13 +105,17 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
   });
   const canSend = computed(() => {
     const d = draft.value;
-    if (!current.value || !d || state.restarting || state.restartPending || state.hydrating || d.loading || d.sending || d.stopping || d.uploading || d.uncertain) return false;
+    if (!current.value || !d || state.authExpired || state.restarting || state.restartPending || state.hydrating || d.readError || d.sending || d.stopping || d.uploading || d.goalSaving || d.uncertain) return false;
     if (active.value) return !!activeTurn.value;
-    const settingsUnavailable = d.dirty && (!d.catalog.models.length || !d.catalog.modes.length);
+    const settingsUnavailable = d.dirty && (d.loading || !d.catalog.models.length || !d.catalog.modes.length);
     return !contextBlocked.value && !settingsUnavailable;
   });
   function report(e: unknown, id?: string) {
     if (!alive || (e instanceof Error && e.name === 'AbortError')) return;
+    if (e instanceof Error && 'status' in e && e.status === 401) {
+      invalidate(); state.authExpired = true; state.connection = '登录已过期';
+      state.error = 'Viewer 登录已过期，请重新打开启动链接'; return;
+    }
     if (id) draftFor(id).error = message(e); else state.error = message(e);
   }
   function toast(text: string) { if (!alive) return; state.toast = text; clearTimeout(toastTimer); toastTimer = setTimeout(() => { state.toast = ''; }, 2500); }
@@ -115,10 +137,12 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
     return (t.updatedAt || 0) > (state.read[t.id] || 0) && t.id !== state.currentId ? ['unread', '未读'] : ['idle', '空闲'];
   }
   async function loadThreads(more = false, changed = false) {
-    if (!alive || (more && !state.cursor)) return;
+    if (!alive || state.authExpired || (more && !state.cursor)) return;
     return refresh(more ? 'more' : 'list', async () => {
       const job = begin(more ? 'more' : 'list'), previousNames = new Map(Object.values(state.entities).map(t => [t.id, t.name]));
       const revisions = { ...state.revisions };
+      const loading = more ? 'moreLoading' : 'listLoading';
+      state[loading] = true; state.listError = '';
       try {
         const result = await client.request<{ data: Thread[]; nextCursor: string | null }>('/threads' + (more && state.cursor ? '?cursor=' + encodeURIComponent(state.cursor) : ''), undefined, job.signal);
         if (!job.valid()) return;
@@ -133,9 +157,11 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
           else state.entities[t.id] = t;
         }
         state.ids = [...new Set([...state.ids, ...result.data.map(t => t.id), ...(state.currentId ? [state.currentId] : [])])];
+        if (more && result.nextCursor && result.nextCursor === state.cursor) throw new Error('历史分页未前进，请刷新后重试');
         if (more || !listLoaded) state.cursor = result.nextCursor;
         listLoaded = true;
-      } catch (e) { if (job.valid()) report(e); }
+      } catch (e) { if (job.valid()) state.listError = message(e); }
+      finally { if (job.valid()) state[loading] = false; }
     }, changed);
   }
   async function loadUsage(changed = false) {
@@ -147,6 +173,22 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
         if (job.valid()) { state.usage = { ...usage, weekly: revision === usageRevision ? usage.weekly : state.usage.weekly }; state.usageError = ''; }
       } catch (e) { if (job.valid()) { state.usage = { weekly: null, resetCount: null }; state.usageError = '额度暂不可用：' + message(e); } }
     }, changed);
+  }
+  async function resetUsage() {
+    if (!alive || state.usageResetPending || state.restarting || state.restartPending || state.connection !== '已连接') return;
+    state.usageResetPending = true;
+    state.usageResetKey ||= read<string>('viewer-usage-reset-key', '') || crypto.randomUUID();
+    try {
+      // Persist before spending a credit; uncertain requests retain the same native idempotency key.
+      try { storage.setItem('viewer-usage-reset-key', JSON.stringify(state.usageResetKey)); }
+      catch { throw new Error('无法保存重置请求，请允许浏览器存储后重试；尚未使用重置卡'); }
+      const result = await client.request<{ outcome: UsageResetOutcome }>('/usage/reset', { confirm: true, idempotencyKey: state.usageResetKey });
+      state.usageResetKey = ''; save('viewer-usage-reset-key', undefined);
+      return result.outcome;
+    } finally {
+      if (alive) await loadUsage(true);
+      state.usageResetPending = false;
+    }
   }
   async function loadSubagents(changed = false) {
     const rootId = state.currentId;
@@ -241,26 +283,33 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
     if (n.method === 'viewer/requestResolved') { delete state.requests[String(n.params.id)]; return; }
     if (n.method === 'viewer/nameError') { report(n.params.message, id); return; }
     if (id && state.entities[id]) {
+      const previousGoal = state.entities[id].goal;
       reduceNotice(state.entities[id], n);
+      const goal = state.entities[id].goal;
+      if (n.method === 'thread/goal/updated' && goal && goal.status !== previousGoal?.status && ['complete', 'blocked', 'usageLimited', 'budgetLimited'].includes(goal.status)) {
+        notify('Goal ' + goalLabels[goal.status], `goal:${id}:${goal.createdAt}:${goal.status}:${goal.updatedAt}`);
+        if (typeof n.params.turnId === 'string') notified.add(n.params.turnId);
+      }
       if (n.method === 'turn/started' || n.method === 'turn/completed' || (n.params.item as { type?: string } | undefined)?.type === 'userMessage') reconcileQueued(id);
       state.revisions[id] = (state.revisions[id] || 0) + 1;
       if (n.method === 'thread/settings/updated' && !n.params.watchdogRunId && !draftFor(id).dirty) draftFor(id).desired = state.entities[id].settings;
     }
     if (n.method === 'turn/completed' && id) {
-      for (const [key, r] of Object.entries(state.requests)) if (r.params.threadId === id) delete state.requests[key];
+      for (const [key, r] of Object.entries(state.requests)) if (r.params.threadId === id && (r.method !== 'mcpServer/elicitation/request' || r.params.turnId === (n.params.turn as Turn).id)) delete state.requests[key];
       draftFor(id).uncertain = false; if (state.currentId === id) markRead(id);
       const turn = n.params.turn as { id: string; status: string };
-      notify(turn.status === 'completed' ? 'Codex 任务已完成' : 'Codex 任务已结束：' + turn.status, turn.id);
+      if (state.entities[id]?.goal?.status !== 'active') notify(turn.status === 'completed' ? 'Codex 本轮已完成' : 'Codex 本轮已结束：' + turn.status, turn.id);
       void loadThreads(false, true);
     }
   }
-  async function openThread(id: string): Promise<boolean> {
+  async function openThread(id: string, initial?: Snapshot): Promise<boolean> {
     if (!alive) return false;
     const job = begin('open:' + id);
     // Preserve already-buffered events when a newer read supersedes an older read.
     const queue = syncing.get(id) || []; syncing.set(id, queue);
     try {
-      const result = await client.request<Snapshot>(`/threads/${encodeURIComponent(id)}/open`, {}, job.signal);
+      // Reuse creation's snapshot unless newer events already arrived; ordinary opens still resync.
+      const result = initial && initial.seq >= lastSeq ? initial : await client.request<Snapshot>(`/threads/${encodeURIComponent(id)}/open`, {}, job.signal);
       if (!job.valid()) return false;
       state.entities[id] = result.thread; if (!state.ids.includes(id)) state.ids.push(id);
       state.revisions[id] = (state.revisions[id] || 0) + 1;
@@ -276,21 +325,23 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
       if (job.valid()) { syncing.delete(id); for (const n of queue) apply(n, id); }
     }
   }
-  async function selectThread(id: string) {
+  async function selectThread(id: string, initial?: Snapshot) {
     if (!alive) return;
     if (draft.value?.sending || draft.value?.uploading) { toast('请等待当前提交或上传完成'); return; }
     const generation = ++selectionGeneration; targetId = id; state.targetTurn=''; state.hydrating = true; state.error = ''; draftFor(id).error = '';
-    const opened = await openThread(id);
+    if (state.currentId !== id) { reads.get('agent')?.abort(); reads.get('agents')?.abort(); refreshes.delete('agents:' + state.currentId); refreshes.delete('agent:' + state.selectedAgentId); state.selectedAgentId = ''; state.agentError = ''; state.agentsError = ''; state.agentLoading = false; }
+    // Show the cached transcript immediately; hydration still gates submissions.
+    state.currentId = id;
+    const opened = await openThread(id, initial);
     if (!alive || generation !== selectionGeneration) return;
     state.hydrating = false;
     if (opened) {
-      if (state.currentId !== id) { reads.get('agent')?.abort(); reads.get('agents')?.abort(); refreshes.delete('agents:' + state.currentId); refreshes.delete('agent:' + state.selectedAgentId); state.selectedAgentId = ''; state.agentError = ''; state.agentsError = ''; state.agentLoading = false; }
       state.currentId = id; markRead(id); void loadControls(id); void loadSubagents();
     }
     else { state.error = draftFor(id).readError; targetId = state.currentId; }
   }
   async function resync(fresh = true) {
-    if (!alive || state.restarting) return;
+    if (!alive || state.restarting || state.authExpired) return;
     void loadUsage(fresh);
     void loadWatchdogs(fresh);
     const id = targetId || state.currentId;
@@ -305,13 +356,14 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
     ++connectionGeneration; ++selectionGeneration;
     for (const controller of reads.values()) controller.abort(); reads.clear();
     refreshes.clear();
+    state.listLoading = false; state.moreLoading = false;
     syncing.clear(); snapshots.clear();
     state.hydrating = false;
-    for (const d of Object.values(state.drafts)) { d.loading = false; if (d.sending) d.uncertain = true; d.sending = false; d.stopping = false; d.uploading = false; }
+    for (const d of Object.values(state.drafts)) { d.loading = false; if (d.sending) d.uncertain = true; d.sending = false; d.stopping = false; d.uploading = false; d.goalSaving = false; }
     state.replying = {};
     state.agentsLoading = false; state.agentLoading = false;
     state.usage = { weekly: null, resetCount: null };
-    for (const t of Object.values(state.entities)) delete t.tokenUsage;
+    for (const t of Object.values(state.entities)) { delete t.tokenUsage; t.goalError = 'Goal 状态待同步'; }
   }
   function receive(n: Update, eventId = '') {
     if (!alive) return;
@@ -319,10 +371,24 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
     if (nextEpoch && epoch && nextEpoch !== epoch) { invalidate(); lastSeq = -1; }
     if (nextEpoch) epoch = nextEpoch;
     if (n.seq !== undefined) { if (n.seq <= lastSeq) return; lastSeq = n.seq; }
-    if (n.method === 'viewer/restarting') { state.restarting = true; state.connection = 'Codex 后端正在重启…'; return; }
-    if (n.method === 'viewer/offline') { state.restarting = n.params.restarting === true; invalidate(); state.connection = state.restarting ? 'Codex 后端正在重启…' : 'Codex 已离线 · 正在恢复'; state.requests = {}; for (const t of Object.values(state.entities)) t.status = { type: 'systemError' }; return; }
-    if (n.method === 'viewer/online' || n.method === 'viewer/resync') { state.restarting = n.params.restarting === true; state.connection = state.restarting ? 'Codex 后端正在重启…' : n.params.online === false ? 'Codex 已离线 · 正在恢复' : '已连接'; void resync(false); return; }
+    if (n.method === 'viewer/restarting') { beginRestart(); return; }
+    if (n.method === 'viewer/restartFailed') { finishRestart('后端重启失败，请重试；未发送的草稿仍保留'); return; }
+    if (n.method === 'viewer/offline') { state.restarting = !!restartEpoch || n.params.restarting === true; invalidate(); state.connection = state.restarting ? '整个后端正在重启…' : 'Codex 已离线 · 正在恢复'; state.requests = {}; for (const t of Object.values(state.entities)) t.status = { type: 'systemError' }; return; }
+    if (n.method === 'viewer/online' || n.method === 'viewer/resync') {
+      const restored = restartEpoch && epoch !== restartEpoch && n.params.online !== false ? restartEpoch : '';
+      state.restarting = n.params.restarting === true || !!restartEpoch && !restored;
+      state.connection = state.restarting ? '整个后端正在重启…' : n.params.online === false ? 'Codex 已离线 · 正在恢复' : '已连接';
+      void resync(false).then(() => {
+        if (!alive) return;
+        if (restored && restartEpoch === restored) finishRestart();
+        else if (pageRestored && state.connection === '已连接' && !state.hydrating && !draft.value?.readError) {
+          pageRestored = false; toast('整个后端已重启，页面已更新');
+        }
+      });
+      return;
+    }
     if (n.method === 'skills/changed') { void loadControls(); return; }
+    if (n.method === 'viewer/usageChanged') { void loadUsage(true); return; }
     if (n.method === 'viewer/watchdogsChanged') {void loadWatchdogs(true);return;}
     if (n.method === 'account/rateLimits/updated') {
       const weekly = usageFrom(n.params).weekly;
@@ -359,14 +425,17 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
     const d = draftFor(current.value.id); (d.answers[itemId] ??= item.questions.map(() => ''))[index] = text;
     save('viewer-answers:' + current.value.id, d.answers);
   }
-  function questionStatus(item: DeepReadonly<Pick<Item, 'id' | 'questions'>>): 'received' | 'queued' | 'history' | '' {
+  function questionResponse(item: DeepReadonly<Pick<Item, 'id' | 'questions'>>): { status: 'received' | 'queued' | 'history' | ''; text: string } {
     const items = current.value?.turns?.flatMap(t => t.items) || [], position = items.findIndex(i => i.id === item.id);
-    if (position < 0) return '';
+    if (position < 0) return { status: '', text: '' };
     // ponytail: correlate quoted replies within history; use native question receipt IDs if the protocol adds them.
     const prefix = questionPrefix(item);
-    if (items.slice(position + 1).some(i => i.type === 'userMessage' && i.content?.some(p => p.type === 'text' && typeof p.text === 'string' && p.text.startsWith(prefix)))) return 'received';
-    if (draft.value?.queued.some(q => q.text.startsWith(prefix))) return 'queued';
-    return items.slice(position + 1).some(i => i.type === 'userMessage') ? 'history' : '';
+    const later = items.slice(position + 1).filter(i => i.type === 'userMessage');
+    const received = later.flatMap(i => i.content || []).find(p => p.type === 'text' && typeof p.text === 'string' && p.text.startsWith(prefix));
+    if (received) return { status: 'received', text: (received.text as string).slice(prefix.length) };
+    const queued = draft.value?.queued.find(q => q.text.startsWith(prefix));
+    if (queued) return { status: 'queued', text: queued.text.slice(prefix.length) };
+    return { status: later.length ? 'history' : '', text: '' };
   }
   function reconcileQueued(id: string) {
     const d = draftFor(id); if (!d.queued.length) return;
@@ -378,12 +447,27 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
     draft.value.queued = draft.value.queued.filter(q => q.id !== messageId); save('viewer-queued:' + state.currentId, draft.value.queued);
   }
   function setSettings(settings: Settings) { if (!alive || !state.currentId) return; const d = draftFor(state.currentId); d.desired = settings; d.dirty = true; save('viewer-settings:' + state.currentId, settings); }
+  async function saveGoal(update: GoalUpdate | null): Promise<boolean> {
+    const id = state.currentId, d = draft.value, generation = connectionGeneration;
+    if (!alive || !id || !d || d.goalSaving || d.sending || d.stopping || state.hydrating || state.restarting || state.connection !== '已连接') return false;
+    const desired = d.desired || current.value?.settings;
+    d.goalSaving = true; d.error = '';
+    try {
+      await client.request(`/threads/${encodeURIComponent(id)}/goal${update === null ? '/clear' : ''}`, update === null ? {} : { ...update, settings: desired });
+      if (!alive || generation !== connectionGeneration) return false;
+      if ((update?.status === 'active' || update?.objective !== undefined && update.status !== 'paused') && d.desired === desired) { d.dirty = false; save('viewer-settings:' + id, undefined); }
+      return await openThread(id);
+    } catch (e) {
+      if (alive && generation === connectionGeneration) { report(e, id); await openThread(id); }
+      return false;
+    } finally { if (alive && generation === connectionGeneration) d.goalSaving = false; }
+  }
   function toggleSkill(skill: Skill, selected = true) { if (!alive || !draft.value) return; const list = draft.value.skills.filter(s => s.path !== skill.path); if (selected) list.push({ ...skill }); draft.value.skills = list; }
   function removeAttachment(id: string) { if (alive && draft.value) draft.value.attachments = draft.value.attachments.filter(a => a.id !== id); }
   async function addFiles(files: File[]) {
     if (!alive) return;
     const id = state.currentId, d = draft.value, generation = connectionGeneration;
-    if (!id || !d || d.sending || state.hydrating) { toast('请先选择任务，并等待提交完成'); return; }
+    if (!id || !d || d.sending || state.hydrating || state.restarting || state.restartPending) { toast('请先选择任务，并等待提交或重启完成'); return; }
     if (d.uploading) { toast('请等待当前上传完成'); return; }
     if (d.attachments.length + files.length > 10) { toast('每轮最多 10 个附件'); return; }
     d.uploading = true;
@@ -391,20 +475,20 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
     catch (e) { if (generation === connectionGeneration) report(e, id); }
     finally { if (alive && generation === connectionGeneration) d.uploading = false; }
   }
-  async function send(action: 'steer' | 'interrupt' = 'steer', questionId?: string): Promise<boolean> {
-    if (!alive || !canSend.value) return false;
+  async function send(action: 'steer' | 'interrupt' = 'steer', questionId?: string, appMessage?: { threadId: string; text: string }): Promise<boolean> {
+    if (!alive || !canSend.value || appMessage && appMessage.threadId !== state.currentId) return false;
     const id = state.currentId, d = draftFor(id), generation = connectionGeneration;
     const question = questionId === undefined ? undefined : current.value?.turns?.flatMap(t => t.items).find(i => i.id === questionId && i.type === 'agentMessage' && i.delivery === 'async' && i.questions?.length);
     if (questionId !== undefined) {
-      if (!question || ['received', 'queued'].includes(questionStatus(question))) return false;
+      if (!question || ['received', 'queued'].includes(questionResponse(question).status)) return false;
       if (question.questions!.some((_, i) => !d.answers[questionId]?.[i]?.trim())) return false;
     }
-    const flushQueued = !question && (!active.value || action === 'interrupt');
+    const flushQueued = !question && !appMessage && (!active.value || action === 'interrupt');
     const queued = flushQueued ? d.queued.map(q => ({ ...q, attachments: q.attachments.map(a => a.id), skills: q.skills.map(s => s.path) })) : [];
     const delivery = queued.length ? 'flush' : active.value ? action : 'start', expectedTurnId = activeTurn.value?.id;
-    const text = question ? questionPrefix(question) + question.questions!.map((_, i) => `${i + 1}. ${d.answers[question.id]![i]!.trim()}`).join('\n') : d.text;
-    const desired = d.desired, attachments = question ? [] : d.attachments.map(a => a.id), skills = question ? [] : d.skills.map(s => s.path);
-    const queuedAttachments = question ? [] : d.attachments.slice(), queuedSkills = question ? [] : d.skills.slice();
+    const text = appMessage?.text ?? (question ? questionPrefix(question) + question.questions!.map((_, i) => `${i + 1}. ${d.answers[question.id]![i]!.trim()}`).join('\n') : d.text);
+    const desired = d.desired, attachments = question || appMessage ? [] : d.attachments.map(a => a.id), skills = question || appMessage ? [] : d.skills.map(s => s.path);
+    const queuedAttachments = question || appMessage ? [] : d.attachments.slice(), queuedSkills = question || appMessage ? [] : d.skills.slice();
     if (!text.trim() && !attachments.length && !queued.length) return false;
     const batchId = queued.length ? crypto.randomUUID() : undefined;
     if (batchId) {
@@ -414,9 +498,9 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
     d.sending = true; d.error = ''; state.error = '';
     try {
       const settings = delivery !== 'steer' && d.catalog.models.length && d.catalog.modes.length ? desired : undefined;
-      const result = await client.request<{ turn?: Turn; messageId?: string; turnId?: string; handledQueuedIds?: string[] }>(
+      const result = await client.request<{ turn?: Turn; messageId?: string; turnId?: string; handledQueuedIds?: string[]; goalWarning?: string }>(
         `/threads/${encodeURIComponent(id)}/turns`,
-        { text, attachments, delivery, expectedTurnId, settings, skills, ...(queued.length ? { queued, batchId } : {}) },
+        { text, attachments, delivery, expectedTurnId, settings, skills, ...(appContexts.get(id)?.size ? { appContexts: [...appContexts.get(id)!.values()] } : {}), ...(queued.length ? { queued, batchId } : {}) },
       );
       if (!alive || generation !== connectionGeneration) return false;
       if (delivery === 'steer' && result.messageId && result.turnId) {
@@ -431,16 +515,17 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
         state.revisions[id] = (state.revisions[id] || 0) + 1;
       }
       if (delivery !== 'steer' && (delivery !== 'flush' || result.turn) && d.desired === desired) { d.dirty = false; save('viewer-settings:' + id, undefined); }
-      if (!question && d.text === text) { d.text = ''; try { storage.setItem('viewer-draft:' + id, ''); } catch {} }
+      if (!question && !appMessage && d.text === text) { d.text = ''; try { storage.setItem('viewer-draft:' + id, ''); } catch {} }
       d.attachments = d.attachments.filter(a => !attachments.includes(a.id)); d.skills = d.skills.filter(s => !skills.includes(s.path));
       if (delivery === 'steer') toast('已排队追加，Codex 将在下次接收输入时处理');
       await openThread(id);
+      if (result.goalWarning) report(result.goalWarning, id);
       return true;
     } catch (e) { if (generation === connectionGeneration) { if (/timed out|中断尚未确认/i.test(message(e))) d.uncertain = true; report(e, id); } }
     finally { if (alive && generation === connectionGeneration) d.sending = false; }
     return false;
   }
-  async function reply(id: string, decision: string, answers: Record<string, string>) {
+  async function reply(id: string, decision: string, answers: Record<string, unknown>) {
     const request = state.requests[id], generation = connectionGeneration;
     if (!alive || !request || state.replying[id]) return;
     state.replying[id] = true;
@@ -450,7 +535,7 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
   }
   async function interrupt() {
     const id = state.currentId, d = draft.value, generation = connectionGeneration;
-    if (!alive || !id || !d || d.sending || d.stopping) return;
+    if (!alive || !id || !d || d.sending || d.stopping || d.goalSaving) return;
     d.stopping = true; d.error = '';
     try { await client.request(`/threads/${encodeURIComponent(id)}/interrupt`, {}); if (alive && generation === connectionGeneration) await openThread(id); }
     catch (e) { if (generation === connectionGeneration) { if (/timed out|中断尚未确认/i.test(message(e))) d.uncertain = true; report(e, id); } }
@@ -458,11 +543,36 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
   }
   async function restartBackend() {
     if (!alive || state.restarting || state.restartPending) return;
-    if (Object.values(state.drafts).some(d => d.sending || d.stopping || d.uploading || d.uncertain)) { toast('请等待提交或上传完成，并确认任务状态后再重启'); return; }
+    if (Object.values(state.drafts).some(d => d.sending || d.stopping || d.uploading || d.goalSaving || d.uncertain)) { toast('请等待提交或上传完成，并确认任务状态后再重启'); return; }
     state.restartPending = true; state.error = '';
-    try { await client.request('/restart', {}); if (alive) toast('Codex 后端已重启'); }
-    catch (e) { if (alive) { state.restarting = false; report(e); } }
-    finally { if (alive) state.restartPending = false; }
+    try {
+      const result = await client.request<{ epoch?: string }>('/restart', {});
+      if (!alive) return;
+      if (!result.epoch) { finishRestart('当前 Viewer 尚未加载完整重启功能，请先重启 Viewer 服务'); return; }
+      if (result.epoch === epoch) beginRestart();
+    } catch (e) { if (alive && !restartEpoch) finishRestart(message(e)); }
+  }
+  function beginRestart() {
+    if (restartEpoch) return;
+    restartEpoch = epoch; state.restarting = true; state.restartPending = true; state.connection = '整个后端正在重启…';
+    restartTimer = setTimeout(() => finishRestart('重启后未能在 60 秒内重新连接，草稿仍保留；请检查服务后重试'), 60_000);
+  }
+  function finishRestart(error = '') {
+    if (error && restartEpoch) state.connection = '重连未完成 · 请检查服务';
+    clearTimeout(restartTimer); restartEpoch = ''; state.restarting = false; state.restartPending = false;
+    if (error) { report(new Error(error)); return; }
+    if (typeof window === 'undefined') { toast('整个后端已重启并重新连接'); return; }
+    try {
+      // One-shot, per-tab handoff: localStorage alone mixes drafts from different tabs.
+      const drafts = Object.fromEntries(Object.entries(state.drafts).map(([id, { text, attachments, skills, queued, answers, desired, dirty, uncertain }]) =>
+        [id, { text, attachments, skills, queued, answers, desired, dirty, uncertain } satisfies ReloadDraft]));
+      window.sessionStorage.setItem(reloadKey, JSON.stringify(drafts));
+      state.restartPending = true;
+      window.location.reload();
+    } catch {
+      state.restartPending = false;
+      report(new Error('后端已重启，但无法暂存草稿以刷新页面；请先保存草稿和附件，再手动刷新'));
+    }
   }
   async function setSkillEnabled(id: string, skill: Skill, enabled: boolean) {
     if (!alive) return;
@@ -479,10 +589,13 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
     if (!alive) return;
     const generation = connectionGeneration, selection = selectionGeneration;
     try {
-      const result = await client.request<{ thread: Thread }>('/threads', { cwd, ...options });
+      const result = await client.request<Snapshot & { models?: Catalog['models'] }>('/threads', { cwd, ...options });
       if (!alive || generation !== connectionGeneration) return;
-      if (selection === selectionGeneration) await selectThread(result.thread.id);
-      if (alive && generation === connectionGeneration) await loadThreads();
+      if (selection === selectionGeneration) {
+        if (result.models) draftFor(result.thread.id).catalog.models = result.models;
+        await selectThread(result.thread.id, result);
+      }
+      if (alive && generation === connectionGeneration) void loadThreads();
     } catch (e) { if (alive && generation === connectionGeneration) throw e; }
   }
   async function rename(id: string, name: string) {
@@ -502,16 +615,30 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
     started = true;
     targetId = id;
     // The server sends an initial resync; it owns bootstrap and reconnect reads.
-    client.subscribe(receive, online => { state.connection = online ? '已连接' : '连接断开 · 重连中'; }, report);
+    client.subscribe(receive, online => { state.connection = state.restarting ? '整个后端正在重启…' : online ? '已连接' : '连接断开 · 重连中'; }, report);
     usageTimer = setInterval(refreshUsage, 60_000);
     agentTimer = setInterval(refreshAgents, 2000);
     if (typeof document !== 'undefined') document.addEventListener('visibilitychange', refreshUsage);
   }
-  function dispose() { if (!alive) return; invalidate(); alive = false; client.dispose(); clearTimeout(toastTimer); clearInterval(usageTimer); clearInterval(agentTimer); if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', refreshUsage); }
+  function updateAppContext(target: AppTarget, context: AppContext) {
+    if (!alive || target.threadId !== state.currentId) throw new Error('应用会话已切换');
+    const entries = appContexts.get(target.threadId) || new Map<string, AppContextInput>();
+    const key = `${target.turnId}:${target.itemId}`, value = { ...target, context };
+    const values = [...entries.entries()].filter(([id]) => id !== key).map(([, value]) => value).concat(value);
+    if (values.length > 64 || JSON.stringify(values).length > appContextLimit) throw new Error('应用上下文过大');
+    entries.set(key, value); appContexts.set(target.threadId, entries);
+  }
+  function dispose() { if (!alive) return; invalidate(); alive = false; appContexts.clear(); client.dispose(); clearTimeout(toastTimer); clearTimeout(restartTimer); clearInterval(usageTimer); clearInterval(agentTimer); if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', refreshUsage); }
   return {
+    describeApp: (target: AppTarget, signal?: AbortSignal) => client.request<{ app: AppDescription | null }>(appPath(target), undefined, signal),
+    openApp: (target: AppTarget, signal?: AbortSignal) => client.request<AppView>(appPath(target) + '/open', {}, signal),
+    appRpc: (id: string, method: string, params: Obj, signal?: AbortSignal) => client.request<Obj>(`/mcp-apps/${id}/rpc`, { method, params }, signal),
+    closeApp: (id: string) => client.request<Obj>(`/mcp-apps/${id}/close`, {}),
+    keepApp: (id: string) => client.request<Obj>(`/mcp-apps/${id}/keepalive`, {}),
+    updateAppContext,
     state: readonly(state), current: computed(() => current.value && readonly(current.value)), draft: computed(() => draft.value && readonly(draft.value)),
     threads: computed(() => readonly(threads.value)), approvals: computed(() => readonly(approvals.value)), active, canSend, contextBlocked,
-    start, dispose, receive, selectThread, loadThreads, loadControls, loadUsage, resync, report, toast, setText, setAnswer, questionStatus, setSettings, toggleSkill, removeAttachment, addFiles, send, dismissQueued, reply, setSkillEnabled, createThread, rename,
+    start, dispose, receive, selectThread, loadThreads, loadControls, loadUsage, resetUsage, resync, report, toast, setText, setAnswer, questionResponse, setSettings, saveGoal, refreshGoal: () => openThread(state.currentId), toggleSkill, removeAttachment, addFiles, send, dismissQueued, reply, setSkillEnabled, createThread, rename,
     status,
     agents, selectedAgent: computed(() => selectedAgent.value && readonly(selectedAgent.value)), loadSubagents, loadAgent, selectAgent, setAgentsVisible,
     loadWatchdogs, saveWatchdog, controlWatchdog, jumpToRun,
@@ -523,7 +650,8 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
     newThreadOptions: (cwd: string, signal?: AbortSignal) => client.request<NewThreadOptions>('/thread-options?cwd=' + encodeURIComponent(cwd), undefined, signal),
     pickDirectory: (path?: string, signal?: AbortSignal) => client.request<{ path: string | null }>('/directories/pick', { path }, signal),
     preview: (threadId: string, target: string, signal?: AbortSignal) => client.request<Preview>('/files/preview?' + new URLSearchParams({ threadId, target }), undefined, signal),
-    openFile: (threadId: string, target: string) => client.request('/files/open', { threadId, target }),
+    openFile: (threadId: string, target: string) => { if (!alive) return Promise.resolve(); state.error = ''; return client.request('/files/open', { threadId, target }); },
+    revealFile: (threadId: string, target: string) => { if (!alive) return Promise.resolve(); state.error = ''; return client.request('/files/reveal', { threadId, target }); },
   };
 }
 

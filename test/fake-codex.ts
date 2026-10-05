@@ -49,6 +49,38 @@ createInterface({ input: process.stdin }).on('line', line => {
     t.approvalsReviewer=p.approvalsReviewer||'user';threads.set(t.id, t);if(p.ephemeral)ephemeral.add(t.id); return reply({ thread: t,model:t.settings!.model,reasoningEffort:'medium',approvalsReviewer:t.approvalsReviewer });
   }
   const t = threads.get(p.threadId);
+  if (m.method === 'thread/goal/get') return reply({ goal: t?.goal || null });
+  if (m.method === 'thread/goal/clear' && t) { const cleared = !!t.goal; t.goal = null; notice('thread/goal/cleared', { threadId: t.id }); return reply({ cleared }); }
+  if (['thread/goal/set', 'mock/goal'].includes(m.method) && t) {
+    const now = Date.now() / 1000;
+    const replacing = p.objective !== undefined && (!t.goal || p.objective !== t.goal.objective || t.goal.status === 'complete');
+    if (replacing) t.goal = { threadId: t.id, objective: p.objective, status: 'active', tokenBudget: null, tokensUsed: 0, timeUsedSeconds: 0, createdAt: now, updatedAt: now };
+    if (!t.goal) return send({ id: m.id, error: { code: -32602, message: 'No goal' } });
+    t.goal = { ...t.goal, ...Object.fromEntries(['status', 'tokenBudget', 'tokensUsed', 'timeUsedSeconds'].filter(k => Object.hasOwn(p, k)).map(k => [k, p[k]])), updatedAt: now };
+    notice('thread/goal/updated', { threadId: t.id, turnId: p.turnId || null, goal: t.goal });
+    reply({ goal: t.goal });
+    if (m.method === 'thread/goal/set' && t.goal.status === 'active' && !t.turns?.some(v => v.status === 'inProgress')) {
+      const turn = { id: 'goal-turn-' + ++next, status: 'inProgress', items: [] };
+      t.turns!.push(turn); t.status = { type: 'active' }; notice('turn/started', { threadId: t.id, turn });
+    }
+    return;
+  }
+  if (m.method === 'mock/goalTurnEnd' && t) {
+    const turn = t.turns?.at(-1);
+    if (turn) { turn.status = 'completed'; t.status = { type: 'idle' }; notice('turn/completed', { threadId: t.id, turn }); }
+    return reply({});
+  }
+  if (m.method === 'mock/mcpApp' && t) {
+    const turn: Turn = { id: p.turnId || 'app-turn-' + ++next, status: p.status || 'completed', items: p.items || [{ id: p.itemId || 'app-item', type: 'mcpToolCall', server: 'fixture', tool: 'show', arguments: { initial: true }, status: 'completed', result: { content: [{ type: 'text', text: 'original result' }], structuredContent: { value: 1 }, _meta: { private: 'original metadata' } } }] };
+    t.turns ??= []; t.turns.push(turn); notice('turn/completed', { threadId: t.id, turn }); return reply({ turn });
+  }
+  if (m.method === 'mock/fileChange' && t) {
+    let turn = t.turns?.at(-1);
+    if (!turn) { turn = { id: 'files-' + t.id, status: 'inProgress', items: [] }; t.turns = [turn]; t.status = { type: 'active' }; notice('turn/started', { threadId: t.id, turn }); }
+    const item = { id: p.id || 'files', type: 'fileChange', changes: p.changes, status: p.status || 'completed', error: p.error };
+    const index = turn.items.findIndex(i => i.id === item.id); if (index < 0) turn.items.push(item); else turn.items[index] = item;
+    notice(item.status === 'inProgress' ? 'item/started' : 'item/completed', { threadId: t.id, turnId: turn.id, item }); return reply({});
+  }
   if (m.method === 'mock/agent' && t) {
     const id = p.id || 'agent-' + ++next;
     const child: Thread = { id, cwd: p.cwd || t.cwd, parentThreadId: t.id, source: { subAgent: { thread_spawn: { parent_thread_id: t.id, depth: 1 } } }, agentNickname: p.name || id, agentRole: 'worker', preview: p.prompt || '检查测试与实现', status: { type: 'active' }, turns: [{ id: 'work-' + id, status: 'inProgress', items: [{ id: 'input-' + id, type: 'userMessage', content: [{ type: 'text', text: p.prompt || '检查测试与实现' }] }] }] };
@@ -90,7 +122,7 @@ createInterface({ input: process.stdin }).on('line', line => {
     else {turn.items.push(item);notice('item/started',{threadId:t.id,turnId:turn.id,item});notice('item/completed',{threadId:t.id,turnId:turn.id,item});}
     return reply({turnId:turn.id});
   }
-  if (m.method === 'mock/release' && t) { const key='tool-'+p.turnId;waiting.get(key)?.();waiting.delete(key);return reply({}); }
+  if (m.method === 'mock/release' && t) { const key='tool-'+p.turnId, resume=waiting.get(key);waiting.delete(key);resume?.();return reply({}); }
   if (m.method === 'mock/receiveQueued' && t) {
     const turn = t.turns!.find(turn => turn.id === p.turnId)!;
     for (const item of (queued.get(turn.id) || []).splice(0, p.count || 1)) {
@@ -109,7 +141,7 @@ createInterface({ input: process.stdin }).on('line', line => {
   if (m.method === 'thread/read' || m.method === 'thread/resume') {
     // Like native loaded threads, resume returns existing settings; updates use their own RPC.
     if (m.method === 'thread/resume' && t?.tokenUsage) notice('thread/tokenUsage/updated', { threadId: t.id, turnId: t.turns?.at(-1)?.id, tokenUsage: t.tokenUsage });
-    return reply({ thread: t ? { ...t, tokenUsage: undefined } : t,model:t?.settings?.model,reasoningEffort:t?.settings?.effort,approvalsReviewer:t?.approvalsReviewer });
+    return reply({ thread: t ? { ...t, tokenUsage: undefined, goal: undefined } : t,model:t?.settings?.model,reasoningEffort:t?.settings?.effort,approvalsReviewer:t?.approvalsReviewer });
   }
   if (m.method === 'turn/start' && t) {
     if(ephemeral.has(t.id)) {
@@ -160,6 +192,28 @@ createInterface({ input: process.stdin }).on('line', line => {
       const report=()=>fetch(process.env.VIEWER_WATCHDOG_URL!,{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${process.env.VIEWER_WATCHDOG_TOKEN}`},body:JSON.stringify({name:'watchdog_report',arguments:{runId:watchdogRun[1],outcome:String(p.input[0]?.text).includes('watchdog-continue')?'continue':'complete'},_meta:{threadId:t.id}})}).then(finish);
       if(String(p.input[0]?.text).includes('watchdog-approval')) {const id='approval-'+next;waiting.set(id,()=>{void report();});send({id,method:'item/commandExecution/requestApproval',params:{threadId:t.id,turnId:turn.id,itemId:'cmd',command:'read remote status',availableDecisions:['accept','decline','cancel']}});}
       else if(String(p.input[0]?.text).includes('watchdog-hold'))waiting.set('tool-'+turn.id,()=>{void report();});else void report();
+    } else if (p.input[0]?.text === 'reasoning-stream') {
+      let item = { id: 'summary-' + turn.id, type: 'reasoning', status: 'inProgress', summary: [] as string[] };
+      const params = { threadId: t.id, turnId: turn.id, itemId: item.id };
+      turn.items.push(item); notice('item/started', { ...params, item });
+      const summarize = (summaryIndex: number, delta: string) => {
+        // Match model presets whose default is none: summaries require an explicit request.
+        if (!p.summary || p.summary === 'none') return;
+        if (item.summary[summaryIndex] === undefined) { item.summary[summaryIndex] = ''; notice('item/reasoning/summaryPartAdded', { ...params, summaryIndex }); }
+        item.summary[summaryIndex] += delta; notice('item/reasoning/summaryTextDelta', { ...params, summaryIndex, delta });
+      };
+      summarize(0, '**Preparing parallel preflight**');
+      waiting.set('tool-' + turn.id, () => {
+        summarize(0, '\n\nCheck literal `*.py` and 2 * 3.'); summarize(1, '**Monitoring preflight validation**');
+        item.status = 'completed'; notice('item/completed', { ...params, item });
+        item = { id: 'summary-next-' + turn.id, type: 'reasoning', status: 'inProgress', summary: [] };
+        params.itemId = item.id; turn.items.push(item); notice('item/started', { ...params, item });
+        summarize(0, '**Cancelling read-only scan**');
+        waiting.set('tool-' + turn.id, () => {
+          summarize(1, '**Keeping preflight serial**');
+          item.status = 'completed'; notice('item/completed', { ...params, item }); finish();
+        });
+      });
     } else if (p.input[0]?.text === 'hold-tool') {
       const item={id:'tool-'+turn.id,type:'commandExecution',command:'sleep 8',status:'inProgress'};
       turn.items.push(item);notice('item/started',{threadId:t.id,turnId:turn.id,item});

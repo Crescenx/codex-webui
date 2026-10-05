@@ -1,15 +1,37 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, symlink, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, chmod, symlink, rm } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 import path from 'node:path';
 import os from 'node:os';
 import { windowsEvidence, reduceNotice, shortTitle, threadTitle, mergeThreadMetadata } from '../shared/protocol.ts';
 import type { Thread, Turn } from '../shared/protocol.ts';
 import { activity } from '../web/activity.ts';
-import { projectRoot, localFile, previewFile } from '../server/files.ts';
+import { projectRoot, localFile, previewFile, openDefault } from '../server/files.ts';
 import { serve } from '../server/main.ts';
 import { AppServer } from '../server/adapter.ts';
+import { HttpError } from '../server/security.ts';
+
+test('service installation retains WSL launch variables without storing a stale interop socket', async t => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'viewer-service-env-'));
+  const saved = Object.fromEntries(['WSL_DISTRO_NAME', 'WSLENV', 'WSL_INTEROP'].map(key => [key, process.env[key]]));
+  try {
+    t.mock.method(os, 'homedir', () => dir);
+    t.mock.method(childProcess, 'spawnSync', (command: string, args: string[]) => { assert.equal(command, 'systemctl'); assert.deepEqual(args, ['--user', 'daemon-reload']); return { status: 0 }; });
+    syncBuiltinESMExports();
+    process.env.WSL_DISTRO_NAME = 'Test Distro'; process.env.WSLENV = 'CUSTOM/u'; process.env.WSL_INTEROP = '/run/WSL/old_interop';
+    await import('../scripts/service.ts');
+    const unit = await readFile(path.join(dir, '.config/systemd/user/codex-viewer.service'), 'utf8');
+    assert.match(unit, /Environment="WSL_DISTRO_NAME=Test Distro"/); assert.match(unit, /Environment="WSLENV=CUSTOM\/u"/);
+    assert.doesNotMatch(unit, /WSL_INTEROP/);
+  } finally {
+    t.mock.restoreAll(); syncBuiltinESMExports();
+    for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
 test('raw Windows evidence ignores Python newlines and unrelated metadata',()=>{
   assert.deepEqual(windowsEvidence({command:"python - <<'PY'\nwith zipfile.ZipFile(p) as z:\n for c in row:\n  print(c)\nPY",reason:'Use powershell.exe',itemId:'cmd'}),[]);
@@ -120,12 +142,44 @@ test('Git grouping and file preview enforce root, type and line boundaries',asyn
     await symlink('/etc/passwd',path.join(child,'outside'));await assert.rejects(localFile('outside',child,[dir]),/授权/);
     await writeFile(path.join(child,'binary.bin'),Buffer.from([0,1,2]));await assert.rejects(previewFile(await localFile('binary.bin',child,[dir])),/二进制/);
     await assert.rejects(previewFile(await localFile('中文 sample.py:50',child,[dir])),/行号/);
+    const folder=await previewFile(await localFile('nested',child,[dir]));assert.ok('kind' in folder&&folder.kind==='directory');
+    await symlink('/etc',path.join(child,'outside-folder'));await assert.rejects(localFile('outside-folder',child,[dir]),/授权/);
   }finally{await rm(dir,{recursive:true,force:true});}
 });
-test('controls, scoped skill writes, settings and editor endpoint',async()=>{
+test('default application launch converts WSL paths without line suffixes or shell interpolation and reports failures', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'viewer-opener-')), command = path.join(dir, 'powershell.exe'), convert = path.join(dir, 'wslpath'), capture = path.join(dir, 'arguments.json');
+  const previousPath = process.env.PATH, previousDistro = process.env.WSL_DISTRO_NAME;
+  const file = { path: '/tmp/中文 space "$()".pdf', line: 12, column: 3 };
+  const windowsPath = '\\\\wsl.localhost\\Ubuntu\\tmp\\中文 space \'$() & [1].pdf';
+  try {
+    await writeFile(convert, '#!' + process.execPath + '\nrequire("node:assert/strict").deepEqual(process.argv.slice(2),' + JSON.stringify(['-w',file.path]) + '); process.stdout.write(' + JSON.stringify(windowsPath) + ');\n');
+    await chmod(convert, 0o700);
+    await writeFile(command, '#!' + process.execPath + '\nrequire("node:fs").writeFileSync(' + JSON.stringify(capture) + ',JSON.stringify(process.argv.slice(2))); process.stdout.write("x".repeat(32768)); process.stderr.write("launcher warning");\n');
+    await chmod(command, 0o700); process.env.PATH = dir; process.env.WSL_DISTRO_NAME = 'Ubuntu';
+    await openDefault(file);
+    const args = JSON.parse(await readFile(capture, 'utf8'));
+    assert.deepEqual(args.slice(0,3), ['-NoProfile','-NonInteractive','-EncodedCommand']);
+    const script = Buffer.from(args[3],'base64').toString('utf16le');
+    assert.match(script,/Start-Process -FilePath/);assert.doesNotMatch(script,/--goto|:12:3|中文|-Wait/);
+    assert.equal(Buffer.from(/FromBase64String\('([^']+)'\)/.exec(script)![1],'base64').toString(),windowsPath);
+    await openDefault(file,true);
+    const revealArgs=JSON.parse(await readFile(capture,'utf8')),revealScript=Buffer.from(revealArgs[3],'base64').toString('utf16le');
+    assert.match(revealScript,/Start-Process -FilePath explorer\.exe -ArgumentList/);assert.ok(revealScript.includes('/select,"'));
+    assert.equal(Buffer.from(/FromBase64String\('([^']+)'\)/.exec(revealScript)![1],'base64').toString(),windowsPath);
+    await writeFile(command, '#!' + process.execPath + '\nprocess.exit(7);\n');
+    await assert.rejects(openDefault(file), /无法使用系统默认应用打开/);
+    await rm(command); await assert.rejects(openDefault(file), /找不到系统打开命令/);
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+    if (previousDistro === undefined) delete process.env.WSL_DISTRO_NAME; else process.env.WSL_DISTRO_NAME = previousDistro;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('controls, scoped skill writes, settings and default application endpoint',async()=>{
   const dir=await mkdtemp(path.join(os.tmpdir(),'viewer-controls-'));await writeFile(path.join(dir,'sample.py'),'one\ntwo');
-  const opened:string[]=[];
-  const app=await serve({roots:[dir],dataDir:path.join(dir,'data'),runtimeDir:path.join(dir,'run'),port:0,adapter:new AppServer({command:process.execPath,args:[path.resolve('test/fake-codex.ts')]}),editor:async f=>{opened.push(`${f.path}:${f.line}`);}});
+  const opened:string[]=[],revealed:string[]=[]; let editorError: Error | undefined;
+  const app=await serve({roots:[dir],dataDir:path.join(dir,'data'),runtimeDir:path.join(dir,'run'),port:0,adapter:new AppServer({command:process.execPath,args:[path.resolve('test/fake-codex.ts')]}),opener:async (f,reveal)=>{if(editorError)throw editorError;(reveal?revealed:opened).push(`${f.path}:${f.line}`);}});
   try{
     const login=await fetch(app.launchUrl,{redirect:'manual'});const cookie=login.headers.get('set-cookie')!.split(';')[0];
     const request=(url:string,data?:unknown)=>fetch(app.origin+'/api'+url,{method:data===undefined?'GET':'POST',headers:{cookie,origin:app.origin,'Content-Type':'application/json'},body:data===undefined?undefined:JSON.stringify(data)});
@@ -140,6 +194,17 @@ test('controls, scoped skill writes, settings and editor endpoint',async()=>{
     const snap=await (await request(`/threads/${threadId}`)).json();assert.deepEqual(snap.thread.settings,settings);
     assert.equal(snap.thread.turns[0].items[0].content[1].type,'skill');
     assert.equal((await request('/files/open',{threadId,target:'sample.py:2'})).status,200);assert.deepEqual(opened,[path.join(dir,'sample.py')+':2']);
+    editorError=new HttpError(504,'系统打开命令超时，窗口可能已经打开，请先检查桌面');
+    const timeout=await request('/files/open',{threadId,target:'sample.py:2'});assert.equal(timeout.status,504);assert.match((await timeout.json()).error,/窗口可能已经打开/);
+    editorError=new Error('launcher failed');assert.equal((await request('/files/open',{threadId,target:'sample.py:2'})).status,502);
+    editorError=undefined;assert.equal((await request('/files/open',{threadId,target:'sample.py:2'})).status,200);
+    await mkdir(path.join(dir,'中文 folder'));
+    assert.equal((await request('/files/open',{threadId,target:'中文 folder'})).status,200);assert.equal(opened.at(-1),path.join(dir,'中文 folder')+':1');
+    assert.equal((await (await request('/files/preview?'+new URLSearchParams({threadId,target:'中文 folder'}))).json()).kind,'directory');
+    assert.equal((await request('/files/reveal',{threadId,target:'中文 folder'})).status,200);
+    assert.equal((await request('/files/reveal',{threadId,target:'sample.py:2'})).status,200);
+    assert.deepEqual(revealed,[path.join(dir,'中文 folder')+':1',path.join(dir,'sample.py')+':2']);
+    assert.equal((await request('/files/reveal',{threadId,target:'/etc/passwd'})).status,403);
     assert.equal((await request('/files/open',{threadId,target:'/etc/passwd'})).status,403);
     assert.equal((await request('/files/preview?'+new URLSearchParams({threadId,target:'sample.py:2'}))).status,200);
   }finally{await app.stop();await rm(dir,{recursive:true,force:true});}

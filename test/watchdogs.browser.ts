@@ -56,7 +56,7 @@ test('calendar editor creates and restores all schedules using the backend timez
       }
       await dialog.getByRole('button', { name: '关闭 Watchdogs' }).click();
     }
-    await page.reload(); await expect(page.locator('.watchdog-chip')).toHaveCount(4);
+    await page.reload();await page.getByRole('button', { name: '展开 Watchdogs', exact: true }).click(); await expect(page.locator('.watchdog-chip')).toHaveCount(4);
     // The browser uses Los Angeles time, but the appointment and displayed deadline use the server timezone.
     await expect(page.locator('.watchdog-chip').filter({ hasText: '单次检查' }).locator('span').last()).toContainText('09:30');
     await page.screenshot({ path: testInfo.outputPath('watchdog-calendar-rail-1920.png') });
@@ -98,7 +98,7 @@ test('session watchdog cards, prompt preview, editor recovery and conversation j
     await card.getByText('收起指令',{exact:true}).click();await expect(card.locator('.watchdog-prompt > p')).toBeHidden();
     await page.screenshot({path:testInfo.outputPath('watchdogs-session-1920.png')});
     await dialog.getByRole('button',{name:'关闭 Watchdogs'}).click();await expect(page.locator('.watchdog-chip')).toContainText('云端训练');
-    const second=await context.newPage();await second.goto(page.url());await expect(second.locator('.watchdog-chip')).toHaveCount(1);
+    const second=await context.newPage();await second.goto(page.url());await second.getByRole('button', { name: '展开 Watchdogs', exact: true }).click();await expect(second.locator('.watchdog-chip')).toHaveCount(1);
     // A model-created task appears through SSE without reloading the page.
     await adapter.call('mock/watchdog',{threadId,name:'watchdog_create',arguments:{name:'日志监控',prompt:'watchdog-continue',intervalMinutes:30}});await expect(page.locator('.watchdog-chip')).toHaveCount(2);
     await expect(second.locator('.watchdog-chip')).toHaveCount(2);
@@ -109,7 +109,7 @@ test('session watchdog cards, prompt preview, editor recovery and conversation j
     await card.getByRole('button',{name:'立即检查'}).click();await expect(card).toContainText('运行中');await card.getByRole('button',{name:'暂停',exact:true}).click();await expect(card).toContainText('本轮运行中 · 后续已停止');
     await dialog.getByRole('button',{name:'关闭 Watchdogs'}).click();await expect(page.locator('#stop')).toBeVisible();
     // Reload while the watchdog uses another model: foreground selection must remain intact.
-    await page.reload();await expect(page.locator('#model')).toHaveValue('mock');
+    await page.reload();await expect(page.locator('#model')).toHaveValue('mock');await page.getByRole('button', { name: '展开 Watchdogs', exact: true }).click();
     await page.locator('#model').selectOption('mock-fast');await page.locator('#effort').selectOption('high');
     const snapshot=await(await page.request.get(app.origin+'/api/threads/'+threadId)).json();await adapter.call('mock/release',{threadId,turnId:snapshot.thread.turns.at(-1).id});await expect(page.locator('#stop')).toBeHidden();
     await expect(page.locator('#model')).toHaveValue('mock-fast');await expect(page.locator('#effort')).toHaveValue('high');
@@ -145,7 +145,7 @@ test('watchdog dialogs stay in their session and ignore stale jump and save resp
     await adapter.call('mock/watchdog', { threadId: other.id, name: 'watchdog_create', arguments: { name: '其他会话任务', prompt: '只检查另一个会话', intervalMinutes: 60 } });
     const { watchdog } = await adapter.call('mock/watchdog', { threadId, name: 'watchdog_create', arguments: { name: '默认强度', prompt: 'watchdog-continue', intervalMinutes: 60, effort: null } });
     const taskId = (watchdog as { id: string }).id;
-    await page.locator('.watchdog-chip').click();
+    await page.getByRole('button', { name: '展开 Watchdogs', exact: true }).click();await page.locator('.watchdog-chip').click();
     const dialog = page.locator('#watchdog-dialog');
     const card = dialog.locator('.watchdog-card').filter({ hasText: '默认强度' });
     const create = page.getByRole('button', { name: '新建 Watchdog', exact: true });

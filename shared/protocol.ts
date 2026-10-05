@@ -8,8 +8,21 @@ export function string(value: unknown): string {
   return value;
 }
 export type AsyncQuestion = { title: string; options?: string[] | null };
-export type Item = { id: string; type: string; text?: string; content?: Obj[]; summary?: string[]; delivery?: 'async' | null; questions?: AsyncQuestion[] | null; command?: string; aggregatedOutput?: string; status?: string; viewerState?: string; startedAt?: number; [key: string]: unknown };
+export type FileUpdateChange = { path: string; kind: { type: 'add' | 'delete' } | { type: 'update'; move_path?: string | null }; diff: string };
+export type Item = { id: string; type: string; text?: string; content?: Obj[]; summary?: string[]; delivery?: 'async' | null; questions?: AsyncQuestion[] | null; command?: string; aggregatedOutput?: string; changes?: FileUpdateChange[]; status?: string; viewerState?: string; startedAt?: number; [key: string]: unknown };
 export type Settings = { model: string; effort: string | null; mode: 'default' | 'plan' };
+export type ModelEvidence = { turnId: string; source: 'viewer/turnModel' | 'model/rerouted' | 'viewer/modelResponse'; model: string | null; effort?: string | null; fromModel?: string; reason?: string; recordedAt: string; requestedModel?: string; responseId?: string; event?: string; status?: string | null; transport?: string };
+export const goalLabels = { active: '进行中', paused: '已暂停', blocked: '受阻', usageLimited: '用量受限', budgetLimited: '预算耗尽', complete: '已完成' };
+export type ThreadGoal = { threadId: string; objective: string; status: keyof typeof goalLabels; tokenBudget: number | null; tokensUsed: number; timeUsedSeconds: number; createdAt: number; updatedAt: number };
+export type GoalUpdate = { objective?: string; status?: 'active' | 'paused'; tokenBudget?: number | null };
+export function goalFrom(value: unknown, threadId: string): ThreadGoal | null {
+  if (value === null) return null;
+  const g = object(value);
+  if (g.threadId !== threadId || typeof g.objective !== 'string' || !Object.hasOwn(goalLabels, String(g.status)) ||
+      !(g.tokenBudget === null || Number.isSafeInteger(g.tokenBudget) && Number(g.tokenBudget) > 0) ||
+      ['tokensUsed', 'timeUsedSeconds', 'createdAt', 'updatedAt'].some(k => typeof g[k] !== 'number' || !Number.isFinite(g[k]) || Number(g[k]) < 0)) throw new Error('无效 Goal 数据');
+  return g as ThreadGoal;
+}
 export type Model = { model:string; displayName:string; supportedReasoningEfforts:{reasoningEffort:string}[]; defaultReasoningEffort:string; isDefault?:boolean; supportsExperimentalContext?:boolean | null };
 export type NewThreadOptions = { models: Model[]; defaultModel: string; contextReason: string };
 export type Skill = { name:string; path:string; description:string; enabled:boolean; scope?:string };
@@ -17,6 +30,7 @@ export type Turn = { id: string; status: string; items: Item[]; error?: unknown 
 export type TokenUsage = { last: { totalTokens: number }; modelContextWindow?: number | null };
 export type RateWindow = { usedPercent: number; windowDurationMins?: number | null; resetsAt?: number | null };
 export type Usage = { weekly: RateWindow | null; resetCount: number | null };
+export type UsageResetOutcome = 'reset' | 'nothingToReset' | 'noCredit' | 'alreadyRedeemed';
 export function usageFrom(result: Obj): Usage {
   const buckets = result.rateLimitsByLimitId as Record<string, Obj> | null | undefined;
   const bucket = buckets?.codex || result.rateLimits as Obj | undefined;
@@ -25,7 +39,7 @@ export function usageFrom(result: Obj): Usage {
   const count = (result.rateLimitResetCredits as Obj | null)?.availableCount;
   return { weekly: weekly || null, resetCount: typeof count === 'number' && Number.isInteger(count) && count >= 0 ? count : null };
 }
-export type Thread = { id: string; cwd: string; parentThreadId?: string | null; source?: string | Obj; agentNickname?: string | null; agentRole?: string | null; projectRoot?:string; settings?:Settings; contextManagement?:boolean; approvalsReviewer?:'user'|'auto_review'; name?: string | null; preview?: string; updatedAt?: number; status?: { type: string; activeFlags?: string[] }; turns?: Turn[]; tokenUsage?: TokenUsage };
+export type Thread = { modelEvidence?: ModelEvidence[]; id: string; cwd: string; parentThreadId?: string | null; source?: string | Obj; agentNickname?: string | null; agentRole?: string | null; projectRoot?:string; settings?:Settings; contextManagement?:boolean; approvalsReviewer?:'user'|'auto_review'; name?: string | null; preview?: string; updatedAt?: number; status?: { type: string; activeFlags?: string[] }; turns?: Turn[]; tokenUsage?: TokenUsage; goal?: ThreadGoal | null; goalError?: string };
 export type Notice = { method: string; params: Obj };
 export type PendingRequest = { id: string; method: string; params: Obj; windows: boolean; windowsEvidence?:string[] };
 export function shortTitle(text: string): string {
@@ -33,7 +47,7 @@ export function shortTitle(text: string): string {
   const chars = Array.from(line.replace(/^\s{0,3}#{1,6}\s+/, '').replace(/\s+/g, ' ').trim());
   return chars.length > 60 ? chars.slice(0,59).join('') + '…' : chars.join('');
 }
-export const threadTitle = (t: Pick<Thread, 'name' | 'preview'>) => t.name || shortTitle(t.preview || '') || '新任务';
+export const threadTitle = (t: Pick<Thread, 'name' | 'preview' | 'goal'>) => t.name || shortTitle(t.preview || t.goal?.objective || '') || '新任务';
 // Metadata refreshes must not replace live turns, status, or effective settings.
 export function mergeThreadMetadata(target: Thread, source: Thread): void {
   if (source.name !== undefined) target.name = source.name;
@@ -81,6 +95,26 @@ function mergeItems(previous:Item[],incoming:Item[]):Item[] {
 export function reduceNotice(thread: Thread, n: Notice): void {
   const p = n.params;
   if (p.threadId !== thread.id) return;
+  if (n.method === 'viewer/modelResponse') {
+    if (typeof p.turnId !== 'string' || typeof p.responseId !== 'string' || typeof p.requestedModel !== 'string' || typeof p.event !== 'string') return;
+    const evidence: ModelEvidence = { source: n.method, turnId: p.turnId, responseId: p.responseId, requestedModel: p.requestedModel, event: p.event, effort: typeof p.effort === 'string' ? p.effort : null, model: typeof p.model === 'string' ? p.model : null, status: typeof p.status === 'string' ? p.status : null, transport: 'WebSocket', recordedAt: typeof p.recordedAt === 'string' ? p.recordedAt : new Date().toISOString() };
+    thread.modelEvidence = [...(thread.modelEvidence || []).filter(e => !(e.source === n.method && e.responseId === evidence.responseId && e.event === evidence.event)), evidence].slice(-100);
+    return;
+  }
+  if (n.method === 'viewer/turnModel' || n.method === 'model/rerouted') {
+    if (typeof p.turnId !== 'string') return;
+    if (n.method === 'model/rerouted' && (typeof p.fromModel !== 'string' || typeof p.toModel !== 'string')) return;
+    const evidence: ModelEvidence = n.method === 'model/rerouted'
+      ? { turnId: p.turnId, source: n.method, model: p.toModel as string, fromModel: p.fromModel as string, reason: typeof p.reason === 'string' ? p.reason : undefined, recordedAt: typeof p.recordedAt === 'string' ? p.recordedAt : new Date().toISOString() }
+      : { turnId: p.turnId, source: n.method, model: typeof p.model === 'string' ? p.model : null, effort: typeof p.effort === 'string' ? p.effort : null, recordedAt: typeof p.recordedAt === 'string' ? p.recordedAt : new Date().toISOString() };
+    // ponytail: retain 100 metadata events per loaded thread; export for a durable audit.
+    thread.modelEvidence = [...(thread.modelEvidence || []), evidence].slice(-100);
+    return;
+  }
+  if (n.method === 'thread/goal/updated' || n.method === 'thread/goal/cleared') {
+    thread.goal = n.method === 'thread/goal/cleared' ? null : goalFrom(p.goal, thread.id);
+    delete thread.goalError;
+  }
   if (n.method === 'thread/tokenUsage/updated') thread.tokenUsage = object(p.tokenUsage) as TokenUsage;
   if (n.method === 'thread/status/changed') thread.status = object(p.status) as Thread['status'];
   if(n.method==='thread/settings/updated') {

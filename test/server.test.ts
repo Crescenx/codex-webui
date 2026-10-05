@@ -12,6 +12,30 @@ import { reduceNotice, windowsEvidence } from '../shared/protocol.ts';
 import { directoryPath } from '../server/files.ts';
 import type { Notice, Thread } from '../shared/protocol.ts';
 
+test('authentication renews both deadlines on access, but never revives an expired or invalid cookie', async t => {
+  const dir = await mkdtemp('/tmp/viewer-auth-');
+  const adapter = new AppServer({ command: process.execPath, args: [path.resolve('test/fake-codex.ts')] });
+  const app = await serve({ roots: [dir], dataDir: dir + '/data', runtimeDir: dir + '/run', port: 0, adapter });
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  try {
+    const login = await fetch(app.launchUrl, { redirect: 'manual' });
+    const cookie = login.headers.get('set-cookie')!.split(';')[0];
+    const read = () => fetch(app.origin + '/api/watchdogs', { headers: { cookie } });
+    now += 23 * 3600_000;
+    const renewed = await read(); assert.equal(renewed.status, 200);
+    assert.equal(renewed.headers.get('set-cookie'), `${cookie}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400`);
+    now += 2 * 3600_000;
+    assert.equal((await read()).status, 200, 'still valid beyond the original 24 hours');
+    const invalid = await fetch(app.origin + '/api/watchdogs', { headers: { cookie: 'viewer=invalid' } });
+    assert.equal(invalid.status, 401); assert.equal(invalid.headers.get('set-cookie'), null);
+    now += 86400_000;
+    const expired = await read(); assert.equal(expired.status, 401);
+    assert.equal(expired.headers.get('set-cookie'), null);
+    assert.match((await expired.json()).error, /登录已过期/);
+  } finally { t.mock.restoreAll(); await app.stop(); await rm(dir, { recursive: true, force: true }); }
+});
+
 test('late turn/start cannot undo completion; Windows access is flagged', () => {
   const t: Thread = { id:'t',cwd:'/tmp',turns:[{id:'a',status:'completed',items:[]}],status:{type:'idle'} };
   reduceNotice(t,{method:'turn/started',params:{threadId:'t',turn:{id:'a',status:'inProgress',items:[]}}});
@@ -48,6 +72,7 @@ test('large SSE frames reach consuming clients, slow clients stay bounded, and o
       assert.equal(response.headers.get('cache-control'), 'no-store'); await response.arrayBuffer();
     }
     const cached = await fetch(app.origin + '/assets/main-12345678.js', { headers: { cookie } });
+    assert.equal(cached.headers.get('set-cookie'), null);
     assert.equal(cached.headers.get('cache-control'), 'private, max-age=31536000, immutable'); await cached.arrayBuffer();
     assert.equal((await fetch(app.origin + '/assets/main-12345678.js')).status, 401);
     const { thread } = await (await fetch(app.origin + '/api/threads', { method: 'POST', headers: { cookie, origin: app.origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ cwd: dir }) })).json();

@@ -10,17 +10,29 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { AppServer } from './adapter.ts';
 import { agentParent, mergeAgentHistory } from '../shared/agents.ts';
 import { generateTitle } from './title.ts';
-import { object, string, threadFrom, reduceNotice, windowsEvidence, shortTitle, messageReceived, mergeThreadMetadata, usageFrom } from '../shared/protocol.ts';
+import { object, string, threadFrom, reduceNotice, windowsEvidence, shortTitle, messageReceived, mergeThreadMetadata, usageFrom, goalFrom } from '../shared/protocol.ts';
 import type { Obj, Notice, Thread, Turn, PendingRequest, Model, Skill, Settings } from '../shared/protocol.ts';
 import { HttpError, secret, equal, inside, directory, bytes, Uploads } from './security.ts';
-import { projectRoot, localFile, previewFile, imageFile, openEditor, directoryPath, pickDirectory } from './files.ts';
+import { projectRoot, localFile, previewFile, imageFile, openDefault, directoryPath, pickDirectory } from './files.ts';
 import { approvalChoices } from '../shared/approvals.ts';
 import { contextKey, contextModels, contextReason, readContextChoice, saveContextChoice } from './context.ts';
 import { Watchdogs, watchdogConfig, watchdogInput, watchdogTimeZone } from './watchdogs.ts';
 import { watchdogLaunch } from './watchdog-mcp.ts';
+import { createMcpApps, elicitationResponse } from './mcp-apps.ts';
+import { appContextLimit } from '../shared/mcp-apps.ts';
+import { checkModelWire } from './model-check.ts';
 import type { Watchdog, WatchdogConfig, WatchdogReport, WatchdogRun } from '../shared/watchdogs.ts';
 
-export async function serve(options: { roots: string[]; dataDir: string; runtimeDir: string; port: number; adapter?: AppServer; codexHome?:string; staticDir?: string; editor?:typeof openEditor; picker?: typeof pickDirectory }) {
+export async function serve(options: { roots: string[]; dataDir: string; runtimeDir: string; port: number; adapter?: AppServer; codexHome?:string; staticDir?: string; opener?:typeof openDefault; picker?: typeof pickDirectory; restart?: (state: string) => Promise<void> }) {
+  // A planned process replacement transfers authentication once, without writing credentials to disk.
+  const transfer = process.env.VIEWER_RESTART_STATE; delete process.env.VIEWER_RESTART_STATE;
+  let restored: { token: string; sessions: [string, number][]; port: number } | undefined;
+  if (transfer) {
+    const saved = JSON.parse(transfer);
+    if (!saved || saved.runtimeDir !== options.runtimeDir || !Number.isFinite(saved.expires) || saved.expires < Date.now() || !Number.isInteger(saved.port) || saved.port < 1 || saved.port > 65535 || (options.port && saved.port !== options.port) ||
+        typeof saved.token !== 'string' || !/^[\w-]{43}$/.test(saved.token) || !Array.isArray(saved.sessions) || saved.sessions.length > 32 || saved.sessions.some((s: unknown) => !Array.isArray(s) || s.length !== 2 || typeof s[0] !== 'string' || !/^[\w-]{43}$/.test(s[0]) || !Number.isFinite(s[1]))) throw new Error('Invalid restart authentication state');
+    restored = saved;
+  }
   const roots = await Promise.all(options.roots.map(p => realpath(p)));
   if (!roots.length) throw new Error('At least one --root is required');
   await mkdir(options.runtimeDir, { recursive: true, mode: 0o700 }); await chmod(options.runtimeDir, 0o700);
@@ -37,10 +49,16 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
   // ponytail: one native picker at a time; scope per client if this becomes multi-user.
   let picking = false;
   const adapter = options.adapter || new AppServer({ cwd: roots[0] });
+  let checkingModel = false, resettingUsage = false;
+  let mcpApps: Awaited<ReturnType<typeof createMcpApps>> | undefined;
   const codexHome = options.codexHome || process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
   const threads = new Map<string, Thread>();
   const revisions=new WeakMap<Thread,number>();
-  function applyNotice(t:Thread,n:Notice) {reduceNotice(t,n);revisions.set(t,(revisions.get(t)||0)+1);}
+  const goalRevisions = new Map<string, number>();
+  function applyNotice(t:Thread,n:Notice) {
+    reduceNotice(t,n);revisions.set(t,(revisions.get(t)||0)+1);
+    if (n.method.startsWith('thread/goal/')) goalRevisions.set(t.id, (goalRevisions.get(t.id) || 0) + 1);
+  }
   const pending = new Map<string, PendingRequest & { rpcId: unknown }>();
   const opening = new Map<string, Promise<Thread>>();
   const naming = new Map<string, Promise<void>>();
@@ -51,7 +69,7 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
   const ring: { id: string; data: string }[] = []; let ringBytes = 0;
   let origin = ''; let online = false; let stopped = false; let reconnect: NodeJS.Timeout | undefined;
   let restarting = false, activeRequests = 0;
-  const token = secret(); const sessions = new Map<string, number>();
+  const token = restored?.token || secret(); const sessions = new Map<string, number>(restored?.sessions);
   const watchdogToken = secret();
   const watchdogs = new Watchdogs(path.join(options.dataDir, 'watchdogs.sqlite'), () => publish('viewer/watchdogsChanged'));
   const finishing = new Map<string, Promise<void>>();
@@ -81,13 +99,15 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
   function browserThread(t:Thread):Thread {const run=watchdogs.activeForThread(t.id);return run?{...t,settings:run.foreground}:t;}
   adapter.on('online', () => { online = true; clearTimeout(reconnect); if (!restarting) { publish('viewer/online'); void recoverWatchdogs(); } });
   adapter.on('offline', () => {
-    online = false; recovering = true; threads.clear(); pending.clear(); busy.clear(); uncertain.clear();
+    mcpApps?.clear();
+    online = false; recovering = true; threads.clear(); goalRevisions.clear(); pending.clear(); busy.clear(); uncertain.clear();
     publish('viewer/offline', { restarting });
     clearTimeout(reconnect);
     if (!stopped && !restarting) reconnect = setTimeout(() => { void adapter.start().catch(() => {}); }, 2000);
   });
   adapter.on('notice', (n: Notice) => {
     if(stopped)return;
+    if (n.method === 'model/rerouted') n = { ...n, params: { ...n.params, recordedAt: new Date().toISOString() } };
     if(n.method==='skills/changed' || n.method==='account/rateLimits/updated') {publish(n.method,n.params);return;}
     if (n.method === 'thread/started') {
       try { const t = threadFrom(n.params.thread); if (roots.some(r => inside(r, t.cwd))) threads.set(t.id, { ...threads.get(t.id), ...t }); } catch { /* ignore unrelated malformed metadata */ }
@@ -97,7 +117,7 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
     if (n.method === 'turn/started' && id) uncertain.delete(id);
     if (n.method === 'turn/completed' && id) {
       uncertain.delete(id);
-      for (const [key, p] of pending) if (p.params.threadId === id) pending.delete(key);
+      for (const [key, p] of pending) if (p.params.threadId === id && (p.method !== 'mcpServer/elicitation/request' || p.params.turnId === (n.params.turn as Turn).id)) pending.delete(key);
     }
     if (n.method === 'serverRequest/resolved') {
       for (const [key, p] of pending) if (p.rpcId === n.params.requestId) pending.delete(key);
@@ -109,7 +129,7 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
   });
   adapter.on('request', (m: Obj) => {
     const params = object(m.params); const method = string(m.method);
-    const known = ['item/commandExecution/requestApproval', 'item/fileChange/requestApproval', 'item/permissions/requestApproval', 'item/tool/requestUserInput'];
+    const known = ['item/commandExecution/requestApproval', 'item/fileChange/requestApproval', 'item/permissions/requestApproval', 'item/tool/requestUserInput', 'mcpServer/elicitation/request'];
     if (!known.includes(method) || typeof params.threadId !== 'string' || !threads.has(params.threadId)) { adapter.unsupported(m.id); return; }
     const id = randomUUID();
     const evidence=windowsEvidence(params);
@@ -128,7 +148,7 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
         const choice = await readContextChoice(options.dataDir, id);
         const reviewer=await configuredReviewer(read.cwd);
         const resumed = await remember(await adapter.call('thread/resume', { threadId: id, cwd: read.cwd, sandbox: 'workspace-write', approvalPolicy: 'on-request', approvalsReviewer:reviewer, ...(choice === undefined ? {} : { config: { [contextKey]: choice } }) }),reviewer);
-        threads.set(id, resumed); return resumed;
+        threads.set(id, resumed); await refreshGoal(resumed); return resumed;
       } catch (error) { threads.delete(id); throw error; }
     })();
     opening.set(id, job);
@@ -142,7 +162,7 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
     const latest = threads.get(id);
     const t = latest ? Object.assign(latest, mergeAgentHistory(fresh, latest, (revisions.get(latest) || 0) !== (revision || 0))) : fresh;
     revisions.set(t, (revisions.get(t) || 0) + 1);
-    threads.set(id, t); return t;
+    threads.set(id, t); await refreshGoal(t); return t;
   }
   async function remember(result:Obj,reviewer?:'user'|'auto_review') {
     const t=threadFrom(result.thread); const previous=threads.get(t.id)?.settings;
@@ -151,7 +171,32 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
     t.contextManagement=await readContextChoice(options.dataDir,t.id);
     if(result.approvalsReviewer==='user' || result.approvalsReviewer==='auto_review')t.approvalsReviewer=result.approvalsReviewer;
     if(reviewer)await syncReviewer(t,reviewer);
-    t.tokenUsage=threads.get(t.id)?.tokenUsage || t.tokenUsage;return t;
+    t.tokenUsage=threads.get(t.id)?.tokenUsage || t.tokenUsage;
+    t.modelEvidence=threads.get(t.id)?.modelEvidence;
+    t.goal=threads.get(t.id)?.goal; t.goalError=threads.get(t.id)?.goalError; return t;
+  }
+  async function refreshGoal(t: Thread, strict = false) {
+    const revision = (goalRevisions.get(t.id) || 0) + 1;
+    goalRevisions.set(t.id, revision);
+    try {
+      const goal = goalFrom((await adapter.call('thread/goal/get', { threadId: t.id })).goal, t.id);
+      if (revision === (goalRevisions.get(t.id) || 0)) { t.goal = goal; delete t.goalError; }
+    } catch (error) {
+      if (revision === (goalRevisions.get(t.id) || 0)) t.goalError = 'Goal 状态待同步：' + (error instanceof Error ? error.message : String(error));
+      if (strict) throw error;
+    }
+  }
+  async function writeGoal(t: Thread, update: Obj | null) {
+    const revision = goalRevisions.get(t.id) || 0;
+    const result = await adapter.call(update === null ? 'thread/goal/clear' : 'thread/goal/set', { threadId: t.id, ...update });
+    const goal = update === null ? null : goalFrom(result.goal, t.id);
+    if (threads.get(t.id) !== t) throw new HttpError(409, '会话已断开，Goal 操作结果待同步');
+    // Native notifications can arrive before the RPC reply. Never overwrite a newer update or clear.
+    if (revision === (goalRevisions.get(t.id) || 0)) {
+      const n = { method: goal ? 'thread/goal/updated' : 'thread/goal/cleared', params: { threadId: t.id, goal, turnId: null } };
+      applyNotice(t, n); publish(n.method, n.params);
+    }
+    return t.goal;
   }
   function mergeMetadata(t:Thread, fresh:Thread, previousName:Thread['name']) {
     // A name notification arriving during the read is newer than that snapshot.
@@ -194,7 +239,10 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
   }
   async function configuredReviewer(cwd:string):Promise<'user'|'auto_review'> {
     // Omitting this override can preserve an old thread's reviewer instead of current config.
-    const reviewer=object((await adapter.call('config/read',{cwd})).config).approvals_reviewer;
+    return reviewerFrom(object((await adapter.call('config/read',{cwd})).config));
+  }
+  function reviewerFrom(config:Obj):'user'|'auto_review' {
+    const reviewer=config.approvals_reviewer;
     if(reviewer==null || reviewer==='user')return 'user';
     if(reviewer==='auto_review' || reviewer==='guardian_subagent')return 'auto_review';
     throw new HttpError(502,'无法识别 Codex 的审批审查配置');
@@ -219,10 +267,16 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
     if(!group)throw new HttpError(502,'未返回此项目的 Skill 列表');
     return group;
   }
-  async function interruptTurn(t: Thread, turn: Turn) {
-    if (turn.status !== 'inProgress') throw new HttpError(409, '目标轮次已结束，消息未发送，请确认后重试');
+  async function interruptTurn(t: Thread, turn?: Turn) {
+    if (turn && turn.status !== 'inProgress') throw new HttpError(409, '目标轮次已结束，消息未发送，请确认后重试');
+    await refreshGoal(t, true);
+    const resumeGoal = t.goal?.status === 'active' ? t.goal : undefined;
+    if (resumeGoal) await writeGoal(t, { status: 'paused' });
+    // Stop follows a goal turn that may start while pausing. Interrupt-and-send keeps its expected target.
+    turn ??= t.turns?.findLast(v => v.status === 'inProgress');
+    if (!turn) { if (resumeGoal) return resumeGoal; throw new HttpError(409, '没有已知的运行轮次，请刷新确认状态'); }
     await pauseRunningWatchdog(t.id);
-    await adapter.call('turn/interrupt', { threadId: t.id, turnId: turn.id });
+    if (turn.status === 'inProgress') await adapter.call('turn/interrupt', { threadId: t.id, turnId: turn.id });
     // An acknowledgement is not completion; both stop paths wait for the native event.
     const deadline = Date.now() + 15_000;
     while (turn.status === 'inProgress' && threads.get(t.id) === t && Date.now() < deadline) await delay(50);
@@ -230,6 +284,7 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
     if (turn.status === 'inProgress') { uncertain.add(t.id); throw new HttpError(409, '中断尚未确认，请确认状态后重试'); }
     if (t.turns?.some(v => v.status === 'inProgress')) throw new HttpError(409, '其他客户端已启动新轮次，请刷新确认');
     const run=watchdogs.activeForThread(t.id);if(run)await finishWatchdog(run,turn);
+    return resumeGoal;
   }
   async function modes() {return (await adapter.call('collaborationMode/list',{})).data as {mode:string;name:string}[];}
   async function validateSettings(t: Thread, s: Settings) {
@@ -241,12 +296,16 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
     if(t.contextManagement && model?.supportsExperimentalContext!==true)throw new HttpError(400,'此会话已开启实验上下文管理，请选择支持该功能的模型，或新建普通会话');
   }
   const collaborationMode = (s: Settings) => ({mode:s.mode,settings:{model:s.model,reasoning_effort:s.effort,developer_instructions:null}});
-  async function startTurn(t:Thread,input:Obj[],settings?:Settings,clientUserMessageId?:unknown,reviewer?:'user'|'auto_review') {
+  async function startTurn(t:Thread,input:Obj[],settings?:Settings,clientUserMessageId?:unknown,reviewer?:'user'|'auto_review',additionalContext?:Obj) {
     const cwd=await directory(t.cwd,roots);
     reviewer ??= await configuredReviewer(cwd);await syncReviewer(t,reviewer);
-    const result=await adapter.call('turn/start',{threadId:t.id,cwd,input,...(clientUserMessageId?{clientUserMessageId}:{}),collaborationMode:settings?collaborationMode(settings):undefined,approvalPolicy:'on-request',approvalsReviewer:reviewer,sandboxPolicy:{type:'workspaceWrite',writableRoots:[cwd],networkAccess:false,excludeTmpdirEnvVar:true,excludeSlashTmp:true}});
+    const recordedAt = new Date().toISOString();
+    // Model presets can default summaries to none; request readable summaries for Viewer turns.
+    const result=await adapter.call('turn/start',{threadId:t.id,cwd,input,summary:'auto',...(additionalContext?{additionalContext}:{}),...(clientUserMessageId?{clientUserMessageId}:{}),collaborationMode:settings?collaborationMode(settings):undefined,approvalPolicy:'on-request',approvalsReviewer:reviewer,sandboxPolicy:{type:'workspaceWrite',writableRoots:[cwd],networkAccess:false,excludeTmpdirEnvVar:true,excludeSlashTmp:true}});
     if(settings)t.settings=settings;
     applyNotice(t,{method:'turn/started',params:{threadId:t.id,turn:result.turn}});
+    const evidence = { method: 'viewer/turnModel', params: { threadId: t.id, turnId: object(result.turn).id, model: settings?.model ?? null, effort: settings?.effort ?? null, recordedAt } };
+    applyNotice(t, evidence); publish(evidence.method, evidence.params);
     return result;
   }
   async function validatedWatchdog(t:Thread,input:Obj):Promise<WatchdogConfig> {
@@ -388,6 +447,8 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
           if (items.slice(items.findLastIndex(i => i.type === 'userMessage') + 1).some(i => i.delivery === 'async' && i.questions?.length)) return;
           busy.add(t.id);
           locked = true;
+          await refreshGoal(t, true);
+          if (t.goal?.status === 'active' || t.status?.type === 'active' || t.turns?.some(v => v.status === 'inProgress')) return;
           if (!t.settings?.model) throw new Error('无法确认会话模型');
           claimed = watchdogs.claim(task.id, { ...t.settings });
           if (!claimed) return;
@@ -430,9 +491,9 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
     }
   }
   const json = (res: ServerResponse, value: unknown, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(value)); };
-  async function body(req: IncomingMessage) {
+  async function body(req: IncomingMessage, max = 1_048_576) {
     if (!req.headers['content-type']?.startsWith('application/json')) throw new HttpError(415, '需要 JSON 请求');
-    try { return object(JSON.parse((await bytes(req, 1_048_576)).toString())); }
+    try { return object(JSON.parse((await bytes(req, max)).toString())); }
     catch (e) { if (e instanceof HttpError) throw e; throw new HttpError(400, '无效 JSON'); }
   }
   async function handler(req: IncomingMessage, res: ServerResponse) {
@@ -441,7 +502,7 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
-    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
+    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; frame-src " + (mcpApps?.frameSource || "'none'"));
     if (req.headers.host !== new URL(origin).host) throw new HttpError(403, 'Host 不匹配');
     if (req.headers.origin && req.headers.origin !== origin) throw new HttpError(403, 'Origin 不匹配');
     const url = new URL(req.url || '/', origin); const p = url.pathname;
@@ -459,19 +520,38 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
       res.writeHead(303, { Location: '/', 'Set-Cookie': `viewer=${session}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400` }); res.end(); return;
     }
     const session = /(?:^|;\s*)viewer=([^;]+)/.exec(req.headers.cookie || '')?.[1];
-    if (!session || (sessions.get(session) || 0) < Date.now()) {
+    if (!session || (sessions.get(session) || 0) <= Date.now()) {
       if (p === '/') { res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8' }); res.end('<h1>Codex Viewer</h1><p>请使用 WSL 启动时显示的链接打开。</p>'); return; }
-      throw new HttpError(401, '会话已失效，请重新打开启动链接');
+      throw new HttpError(401, 'Viewer 登录已过期，请重新打开启动链接');
     }
-    if (restarting && p.startsWith('/api/') && p !== '/api/events') throw new HttpError(409, 'Codex 后端正在重启，请稍候');
+    // Cached static assets must not carry session cookies; page/API access renews both deadlines.
+    if (p === '/' || p.startsWith('/api/')) {
+      sessions.set(session, Date.now() + 86400_000);
+      res.setHeader('Set-Cookie', `viewer=${session}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400`);
+    }
+    if (restarting && p.startsWith('/api/') && p !== '/api/events') throw new HttpError(409, '整个后端正在重启，请稍候');
+    const appTarget = /^\/api\/threads\/([^/]+)\/mcp-apps\/([^/]+)\/([^/]+)(?:\/(open))?$/.exec(p);
+    if (appTarget && mcpApps) {
+      const target = { threadId: decodeURIComponent(appTarget[1]), turnId: decodeURIComponent(appTarget[2]), itemId: decodeURIComponent(appTarget[3]) };
+      if (req.method === 'GET' && !appTarget[4]) return json(res, { app: await mcpApps.describe(target) });
+      if (req.method === 'POST' && appTarget[4] === 'open') { await body(req); return json(res, await mcpApps.open(target, session)); }
+    }
+    const appRequest = /^\/api\/mcp-apps\/([a-f0-9]{48})\/(rpc|close|keepalive)$/.exec(p);
+    if (appRequest && mcpApps && req.method === 'POST') {
+      const b = await body(req), id = appRequest[1];
+      if (appRequest[2] === 'close') { mcpApps.close(id, session); return json(res, {}); }
+      if (appRequest[2] === 'keepalive') { mcpApps.keepalive(id, session); return json(res, {}); }
+      return json(res, await mcpApps.rpc(id, session, string(b.method), object(b.params ?? {})));
+    }
     if (p === '/api/restart' && req.method === 'POST') {
       await body(req);
-      const active = (t: Thread) => t.status?.type === 'active' || t.turns?.some(turn => turn.status === 'inProgress');
+      if (!options.restart) throw new HttpError(501, '当前启动方式不支持重启整个后端');
+      const active = (t: Thread) => t.goal?.status === 'active' || t.status?.type === 'active' || t.turns?.some(turn => turn.status === 'inProgress');
       if (restarting || activeRequests || opening.size || naming.size || busy.size || pending.size || uncertain.size || finishing.size || watchdogs.active().length || (online && recovering))
         throw new HttpError(409, '仍有请求、审批或检查未结束，请等待完成后再重启');
       if ([...threads.values()].some(active)) throw new HttpError(409, '仍有任务正在运行，请先停止任务再重启');
       restarting = true;
-      let attempted = false;
+      let accepted = false;
       try {
         if (online) {
           // Include native subagents and threads not currently selected in the browser.
@@ -482,21 +562,25 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
               let t: Thread;
               try { t = threadFrom((await adapter.call('thread/read', { threadId: id, includeTurns: false })).thread); }
               catch { throw new HttpError(409, '无法确认所有会话已保存，暂不重启；新对话请先发送一条消息'); }
-              if (active(t)) throw new HttpError(409, '仍有任务正在运行，请先停止任务再重启');
+              await refreshGoal(t, true);
+              if (active(t) || active(threads.get(id) || t)) throw new HttpError(409, '仍有任务正在运行，请先停止任务再重启');
             }
             cursor = loaded.nextCursor;
           } while (cursor);
         }
         clearTimeout(reconnect);
-        attempted = true; publish('viewer/restarting');
-        await adapter.restart();
-        return json(res, { ok: true });
-      } finally {
-        restarting = false;
-        if (attempted && !stopped) {
+        const state = JSON.stringify({ token, sessions: [...sessions].filter(([, expires]) => expires > Date.now()), port: Number(new URL(origin).port), runtimeDir: options.runtimeDir, expires: Date.now() + 120_000 });
+        accepted = true; publish('viewer/restarting');
+        // Flush the acceptance response before closing HTTP/SSE and replacing this Node process.
+        res.once('finish', () => { setImmediate(() => { void options.restart!(state).catch(() => {
+          if (stopped) return;
+          restarting = false; publish('viewer/restartFailed');
           if (online) { publish('viewer/online'); void recoverWatchdogs(); }
-          else { publish('viewer/offline', { restarting: false }); clearTimeout(reconnect); reconnect = setTimeout(() => { void adapter.start().catch(() => {}); }, 2000); }
-        }
+          else { publish('viewer/offline', { restarting: false }); reconnect = setTimeout(() => { void adapter.start().catch(() => {}); }, 2000); }
+        }); }); });
+        return json(res, { ok: true, epoch }, 202);
+      } finally {
+        if (!accepted) restarting = false;
       }
     }
     if(p==='/api/watchdogs' && req.method==='GET') {
@@ -556,6 +640,32 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
       return json(res, { roots, path: dir, directories: [...new Set(children)].sort() });
     }
     if(p==='/api/usage' && req.method==='GET') return json(res, usageFrom(await adapter.call('account/rateLimits/read')));
+    if (p === '/api/usage/reset' && req.method === 'POST') {
+      const b = await body(req);
+      if (b.confirm !== true || typeof b.idempotencyKey !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(b.idempotencyKey))
+        throw new HttpError(400, '请先确认使用 1 张重置卡');
+      if (resettingUsage) throw new HttpError(409, '额度重置正在处理，请稍候再核对');
+      resettingUsage = true;
+      try {
+        const result = await adapter.call('account/rateLimitResetCredit/consume', { idempotencyKey: b.idempotencyKey });
+        if (!['reset', 'nothingToReset', 'noCredit', 'alreadyRedeemed'].includes(String(result.outcome))) throw new HttpError(502, '未能确认额度重置结果');
+        return json(res, { outcome: result.outcome });
+      } finally { resettingUsage = false; publish('viewer/usageChanged'); }
+    }
+    const modelCheckRoute = /^\/api\/threads\/([^/]+)\/model-check$/.exec(p);
+    if (modelCheckRoute && req.method === 'POST') {
+      await body(req);
+      if (checkingModel) throw new HttpError(409, '已有 HTTP 模型探测正在进行');
+      checkingModel = true;
+      try {
+        const t = await openThread(decodeURIComponent(modelCheckRoute[1]));
+        if (!t.settings?.model) throw new HttpError(400, '无法确认会话模型');
+        const [account, config] = await Promise.all([adapter.call('account/read'), adapter.call('config/read', { cwd: t.cwd })]);
+        const c = object(config.config);
+        if (object(account.account).type !== 'chatgpt' || c.model_provider && c.model_provider !== 'openai' || c.chatgpt_base_url && !['https://chatgpt.com/backend-api', 'https://chatgpt.com/backend-api/'].includes(String(c.chatgpt_base_url))) throw new HttpError(400, '此探测仅支持默认官方 ChatGPT 登录；不会替换自定义服务商');
+        return json(res, await checkModelWire(options.runtimeDir, { ...t.settings }, adapter.fork()));
+      } finally { checkingModel = false; }
+    }
     if(p==='/api/thread-options' && req.method==='GET') return json(res,await newThreadOptions(await directory(string(url.searchParams.get('cwd')),roots)));
     if(p==='/api/controls' && req.method==='GET') {
       const t=await openThread(string(url.searchParams.get('threadId'))); const errors:Record<string,string>={};
@@ -571,7 +681,7 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
       const r=await adapter.call('skills/config/write',{path:found.path,enabled:b.enabled});
       publish('skills/changed');return json(res,r);
     }
-    if((['/api/files/preview','/api/files/image'].includes(p) && req.method==='GET')||(p==='/api/files/open' && req.method==='POST')) {
+    if((['/api/files/preview','/api/files/image'].includes(p) && req.method==='GET')||(['/api/files/open','/api/files/reveal'].includes(p) && req.method==='POST')) {
       const b=req.method==='POST'?await body(req):{threadId:url.searchParams.get('threadId'),target:url.searchParams.get('target')};
       const t=await readThread(string(b.threadId));
       const file=await localFile(string(b.target),t.cwd,roots);
@@ -580,22 +690,27 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
         res.setHeader('Content-Type',mime);res.setHeader('Content-Length',data.length);res.end(data);return;
       }
       if(req.method==='GET')return json(res,await previewFile(file));
-      try {await (options.editor||openEditor)(file);}catch{throw new HttpError(502,'无法启动 VS Code，请检查 WSL 的 code 命令与 Remote WSL 扩展');}
+      try {await (options.opener||openDefault)(file,p==='/api/files/reveal');}catch(error){if(error instanceof HttpError)throw error;throw new HttpError(502,'系统打开失败，请检查文件关联和系统环境');}
       return json(res,{ok:true});
     }
     if (p === '/api/threads' && req.method === 'GET') {
       const previousNames=new Map([...threads].map(([id,t])=>[id,t.name]));
       const result = await adapter.call('thread/list', { limit: 50, sortKey: 'updated_at', sourceKinds: ['cli', 'vscode', 'appServer'], cursor: url.searchParams.get('cursor') || null });
       const data: Thread[] = [];
-      const projects=new Map<string,Promise<string>>();
-      for (const raw of result.data as unknown[] || []) {
-        const t = threadFrom(raw);
-        try {
-          await directory(t.cwd, roots); if(!projects.has(t.cwd))projects.set(t.cwd,projectRoot(t.cwd,roots));
-          const root=await projects.get(t.cwd);const cached=threads.get(t.id);
-          if(cached)mergeMetadata(cached,t,previousNames.get(t.id));
-          data.push({ ...browserThread({ ...t, ...cached }), projectRoot:root, turns: undefined });
-        } catch { /* out of authorized roots */ }
+      const page = (result.data as unknown[] || []).map(threadFrom);
+      const projects = new Map<string, string>();
+      const directories = [...new Set(page.map(t => t.cwd))].values();
+      await Promise.all(Array.from({ length: 4 }, async () => {
+        for (const cwd of directories) {
+          try { await directory(cwd, roots); projects.set(cwd, await projectRoot(cwd, roots)); }
+          catch { /* unavailable or out of authorized roots */ }
+        }
+      }));
+      for (const t of page) {
+        const root = projects.get(t.cwd); if (!root) continue;
+        const cached = threads.get(t.id);
+        if (cached) mergeMetadata(cached, t, previousNames.get(t.id));
+        data.push({ ...browserThread({ ...t, ...cached }), projectRoot: root, turns: undefined });
       }
       return json(res, { data, nextCursor: result.nextCursor, online });
     }
@@ -604,15 +719,66 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
       if(b.contextManagement!==undefined && typeof b.contextManagement!=='boolean')throw new HttpError(400,'无效上下文管理选项');
       if(b.model!==undefined && (typeof b.model!=='string' || !b.model))throw new HttpError(400,'无效模型');
       const choice=b.contextManagement===true;
+      const [settings,catalog,account]=await Promise.all([
+        adapter.call('config/read',{cwd}),
+        b.model!==undefined || choice ? models() : Promise.resolve([] as Model[]),
+        choice ? adapter.call('account/read',{}) : Promise.resolve(null),
+      ]);
+      const config=object(settings.config),reviewer=reviewerFrom(config);
       if(b.model!==undefined || choice) {
-        const available=await newThreadOptions(cwd),model=available.models.find(m=>m.model===b.model);
-        if(!model && b.model!==available.defaultModel)throw new HttpError(400,'请选择当前可用模型');
-        if(choice && (available.contextReason || model?.supportsExperimentalContext!==true))throw new HttpError(400,available.contextReason || '此模型不支持实验上下文管理，或其能力尚未确认');
+        const model=catalog.find(m=>m.model===b.model);
+        if(!model && b.model!==config.model)throw new HttpError(400,'请选择当前可用模型');
+        const reason=choice ? contextReason(account!,config) : '';
+        if(choice && (reason || model?.supportsExperimentalContext!==true))throw new HttpError(400,reason || '此模型不支持实验上下文管理，或其能力尚未确认');
       }
-      const reviewer=await configuredReviewer(cwd);
       const t = await remember(await adapter.call('thread/start', { cwd, model:b.model, sandbox: 'workspace-write', approvalPolicy: 'on-request', approvalsReviewer:reviewer, config:{[contextKey]:choice} }),reviewer);
       await saveContextChoice(options.dataDir,t.id,choice);t.contextManagement=choice;
-      threads.set(t.id, t); publish('viewer/thread', { thread: { ...t, turns: undefined } }); return json(res, { thread: t });
+      t.goal = null; threads.set(t.id, t); publish('viewer/thread', { thread: { ...t, turns: undefined } });
+      return json(res, { thread: browserThread(t), requests: requestsFor(t.id), uncertain: uncertain.has(t.id), seq, models: catalog });
+    }
+    const goalRoute = /^\/api\/threads\/([^/]+)\/goal(?:\/(clear))?$/.exec(p);
+    if (goalRoute && (req.method === 'GET' && !goalRoute[2] || req.method === 'POST')) {
+      const t = await openThread(decodeURIComponent(goalRoute[1]));
+      if (req.method === 'GET') { await refreshGoal(t); return json(res, { goal: t.goal, goalError: t.goalError, seq }); }
+      const b = await body(req), clear = !!goalRoute[2];
+      const update: Obj = {};
+      if (b.objective !== undefined) {
+        if (typeof b.objective !== 'string' || !b.objective.trim() || Array.from(b.objective.trim()).length > 4000) throw new HttpError(400, '目标须为 1–4000 个字符');
+        update.objective = b.objective.trim();
+      }
+      if (b.status !== undefined) {
+        if (b.status !== 'active' && b.status !== 'paused') throw new HttpError(400, '无效 Goal 操作');
+        update.status = b.status;
+      }
+      if (Object.hasOwn(b, 'tokenBudget')) {
+        if (b.tokenBudget !== null && (!Number.isSafeInteger(b.tokenBudget) || Number(b.tokenBudget) <= 0)) throw new HttpError(400, 'Token 预算须为正整数，或留空取消上限');
+        update.tokenBudget = b.tokenBudget;
+      }
+      if (!clear && !Object.keys(update).length) throw new HttpError(400, '缺少 Goal 修改内容');
+      if (busy.has(t.id) || uncertain.has(t.id)) throw new HttpError(409, '上次操作尚未确认，请等待或刷新状态');
+      if (watchdogs.activeForThread(t.id)) throw new HttpError(409, 'Watchdog 正在执行，请等待结束后管理 Goal');
+      busy.add(t.id);
+      try {
+        await refreshGoal(t, true);
+        if (!clear && !t.goal && !update.objective) throw new HttpError(400, '请先设置目标');
+        const activates = !clear && (update.status === 'active' || update.objective !== undefined && update.status !== 'paused');
+        if (activates) {
+          const settings = b.settings === undefined ? t.settings : object(b.settings) as Settings;
+          if (!settings) throw new HttpError(400, '无法确认会话设置');
+          await validateSettings(t, settings);
+          const cwd = await directory(t.cwd, roots), reviewer = await configuredReviewer(cwd);
+          await syncReviewer(t, reviewer);
+          await adapter.call('thread/settings/update', { threadId: t.id, collaborationMode: collaborationMode(settings), summary: 'auto', approvalPolicy: 'on-request', approvalsReviewer: reviewer,
+            sandboxPolicy: { type: 'workspaceWrite', writableRoots: [cwd], networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true } });
+          t.settings = settings;
+        }
+        await writeGoal(t, clear ? null : update);
+        return json(res, { goal: t.goal, seq });
+      } catch (error) {
+        // Reconcile accepted-but-unacknowledged writes; never replay goal activation.
+        await refreshGoal(t);
+        throw error;
+      } finally { releaseThread(t.id); }
     }
     const match = /^\/api\/threads\/([^/]+)(?:\/(open|turns|interrupt|name|subagents))?$/.exec(p);
     if (match) {
@@ -634,14 +800,14 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
       }
       if (req.method === 'GET' && !action) {
         if (url.searchParams.get('refresh') === '1') return json(res, { thread: await readThread(id, true), requests: requestsFor(id), seq });
-        if (threads.has(id)) return json(res, { thread: browserThread(threads.get(id)!), requests: requestsFor(id), uncertain: uncertain.has(id), seq });
+        if (threads.has(id)) { const t = threads.get(id)!; await refreshGoal(t); return json(res, { thread: browserThread(t), requests: requestsFor(id), uncertain: uncertain.has(id), seq }); }
         const t = threadFrom((await adapter.call('thread/read', { threadId: id, includeTurns: true })).thread);
-        await directory(t.cwd, roots); return json(res, { thread: t, requests: [], seq });
+        await directory(t.cwd, roots); await refreshGoal(t); return json(res, { thread: t, requests: [], seq });
       }
       if (req.method === 'POST' && action === 'open') {
         const cached=threads.has(id);const t=await openThread(id);
         if(cached)await syncReviewer(t,await configuredReviewer(t.cwd));
-        if(cached)await refreshMetadata(t,true);
+        if(cached) { await refreshMetadata(t,true); await refreshGoal(t); }
         return json(res, { thread:browserThread(t), requests: requestsFor(id), uncertain: uncertain.has(id), seq });
       }
       if (req.method === 'POST' && action === 'name') {
@@ -651,7 +817,7 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
         return json(res,{name:t.name});
       }
       if (req.method === 'POST' && action === 'turns') {
-        const b = await body(req); const text = string(b.text);
+        const b = await body(req, appContextLimit + 1_048_576); const text = string(b.text);
         const delivery = b.delivery ?? 'start';
         if (typeof delivery !== 'string' || !['start', 'steer', 'interrupt', 'flush'].includes(delivery)) throw new HttpError(400, '无效发送方式');
         if (['steer', 'interrupt'].includes(delivery) && typeof b.expectedTurnId !== 'string') throw new HttpError(400, '缺少目标轮次，请刷新后重试');
@@ -667,6 +833,7 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
         if (!Array.isArray(ids) || ids.length > 10 || ids.some(i => typeof i !== 'string')) throw new HttpError(400, '最多 10 个附件');
         if (!text.trim() && !ids.length && !queued.length) throw new HttpError(400, '请输入内容');
         const t = await openThread(id);
+        const appContext = await mcpApps?.contexts(id, b.appContexts), additionalContext = appContext?.additionalContext;
         if (queued.some(q => !t.turns?.some(turn => turn.id === q.turnId))) throw new HttpError(400, '待接收消息不属于此会话');
         const firstTurn=!t.turns?.length;
         if (busy.has(id) || uncertain.has(id)) throw new HttpError(409, '上次提交尚未确认，请等待或刷新状态');
@@ -720,18 +887,25 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
           let input = draftInput;
           if (delivery === 'steer') {
             const messageId = randomUUID();
-            const result = await adapter.call('turn/steer', { threadId: id, expectedTurnId: target!.id, clientUserMessageId: messageId, input });
+            const result = await adapter.call('turn/steer', { threadId: id, expectedTurnId: target!.id, clientUserMessageId: messageId, input: [...input, ...(appContext?.images ?? [])], ...(additionalContext ? { additionalContext } : {}) });
             return json(res, { ...result, messageId });
           }
           const reviewer=await configuredReviewer(cwd);await syncReviewer(t,reviewer);
           // All input validation finishes before cancellation.
-          if (delivery === 'interrupt' || delivery === 'flush' && target) await interruptTurn(t, target!);
+          const resumeGoal = delivery === 'interrupt' || delivery === 'flush' && target ? await interruptTurn(t, target!) : undefined;
           if (delivery === 'flush') {
             // Messages may be consumed while cancellation is in flight. Only forward the remainder.
             const seen = received();
             input = [...batches.filter(batch => !messageReceived(batch.message, seen)).flatMap(batch => batch.input), ...draftInput];
           }
-          const result = await startTurn(t,input,settings,delivery==='flush'?b.batchId:undefined,reviewer);
+          const result = await startTurn(t,[...input, ...(appContext?.images ?? [])],settings,delivery==='flush'?b.batchId:undefined,reviewer,additionalContext);
+          let goalWarning: string | undefined;
+          if (resumeGoal) {
+            try {
+              await refreshGoal(t, true);
+              if (t.goal?.status === 'paused' && t.goal.createdAt === resumeGoal.createdAt && t.goal.objective === resumeGoal.objective) await writeGoal(t, { status: 'active' });
+            } catch { goalWarning = '消息已发送，Goal 恢复结果待同步；请检查状态后继续'; }
+          }
           if(firstTurn) {
             const preview=shortTitle(text) || '附件任务';
             if(!t.preview)t.preview=preview;
@@ -740,7 +914,7 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
               if(!stopped && !t.name)publish('viewer/nameError',{threadId:id,message:'自动标题生成未完成，暂用首句预览。可点击顶部“重命名”设置标题。'});
             });
           }
-          return json(res, { ...result, ...(delivery === 'flush' ? { handledQueuedIds } : {}) });
+          return json(res, { ...result, goalWarning, ...(delivery === 'flush' ? { handledQueuedIds } : {}) });
         } catch (error) {
           // A timeout can occur AFTER Codex accepted the request. Never automatically retry it.
           if (error instanceof Error && /timed out/.test(error.message)) uncertain.add(id);
@@ -748,11 +922,10 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
         } finally { releaseThread(id); }
       }
       if (req.method === 'POST' && action === 'interrupt') {
-        const t = await openThread(id); const turn = t.turns?.findLast(v => v.status === 'inProgress');
+        const t = await openThread(id);
         if (busy.has(id)) throw new HttpError(409, '正在提交消息，请稍后停止');
-        if (!turn) throw new HttpError(409, '没有已知的运行轮次，请刷新确认状态');
         busy.add(id);
-        try { await interruptTurn(t, turn); return json(res, {}); } finally { releaseThread(id); }
+        try { await interruptTurn(t); return json(res, {}); } finally { releaseThread(id); }
       }
     }
     const approval = /^\/api\/requests\/([^/]+)$/.exec(p);
@@ -764,6 +937,7 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
       if (!choice) throw new HttpError(400, '此请求不支持所选授权范围');
       // Rules and permissions come only from the pending Codex request, never the browser.
       let result: Obj = choice.result;
+      if (request.method === 'mcpServer/elicitation/request') result = elicitationResponse(request.params, decision, object(b.answers ?? {}));
       if (request.method === 'item/tool/requestUserInput') {
         const answers: Obj = {}; const submitted = object(b.answers ?? {});
         for (const raw of request.params.questions as unknown[] || []) {
@@ -807,29 +981,53 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
     }).finally(() => { if (tracked) activeRequests--; });
   });
   server.requestTimeout = 30_000; server.headersTimeout = 10_000;
-  await new Promise<void>((resolve,reject) => { server.once('error',reject); server.listen(options.port, '127.0.0.1', resolve); });
+  await new Promise<void>((resolve,reject) => { server.once('error',reject); server.listen(restored?.port || options.port, '127.0.0.1', resolve); });
   const address = server.address(); if (!address || typeof address === 'string') throw new Error('No address');
   origin = `http://127.0.0.1:${address.port}`;
-  adapter.configureLaunch(watchdogLaunch(`${origin}/internal/watchdogs`,watchdogToken));
+  try {
+    mcpApps = await createMcpApps(adapter, async id => {
+      const t = threads.get(id);
+      if (!t?.turns) return readThread(id, true);
+      await directory(t.cwd, roots); return t;
+    }, staticDir, origin);
+  } catch (error) { clearInterval(cleanupTimer); clearInterval(watchdogTimer); server.close(); watchdogs.close(); throw error; }
+  const launch = watchdogLaunch(`${origin}/internal/watchdogs`,watchdogToken);
+  adapter.configureLaunch({ ...launch, args: [...launch.args, '-c', 'features.goals=true'], captureModels: true });
   const launchUrl = `${origin}/?token=${token}`;
   const urlFile = path.join(options.runtimeDir, 'url');
   try { await writeFile(urlFile, launchUrl + '\n', { mode: 0o600 }); await chmod(urlFile, 0o600); }
-  catch (error) { clearInterval(cleanupTimer); server.close(); throw error; }
+  catch (error) { clearInterval(cleanupTimer); clearInterval(watchdogTimer); await mcpApps.stop(); server.close(); watchdogs.close(); throw error; }
   void adapter.start().catch(() => {});
   return { server, adapter, origin, launchUrl, async stop() {
-    stopped = true; clearTimeout(reconnect); clearInterval(cleanupTimer); clearInterval(watchdogTimer); adapter.stop();
+    if (stopped) return;
+    stopped = true; clearTimeout(reconnect); clearInterval(cleanupTimer); clearInterval(watchdogTimer);
+    const child = adapter.child;
+    const exited = child && child.exitCode === null ? new Promise<void>(resolve => {
+      const timer = setTimeout(() => child.kill('SIGKILL'), 5000);
+      child.once('close', () => { clearTimeout(timer); resolve(); });
+    }) : Promise.resolve();
+    adapter.stop();
+    await mcpApps?.stop();
     for (const c of clients) c.end(); server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));
     await unlink(urlFile).catch(() => {});
     watchdogs.close();
+    await exited;
   } };
+}
+
+export async function restartProcess(app: { stop(): Promise<void> }, state: string) {
+  if (!process.execve) throw new Error('Node does not support process replacement');
+  await app.stop();
+  try { process.execve(process.execPath, [process.execPath, ...process.execArgv, ...process.argv.slice(1)], { ...process.env, VIEWER_RESTART_STATE: state } as Record<string, string>); }
+  catch { console.error('Viewer process replacement failed'); process.exit(1); }
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const { values } = parseArgs({ options: { root: { type:'string', multiple:true }, port:{type:'string',default:'8787'}, 'data-dir':{type:'string'}, 'runtime-dir':{type:'string'} } });
   const port = Number(values.port); if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid port');
   const runtimeDir = values['runtime-dir'] || path.join(process.env.XDG_RUNTIME_DIR || os.tmpdir(), `codex-viewer-${process.getuid?.() ?? 'user'}`);
-  const app = await serve({ roots: values.root || [path.join(os.homedir(), 'projects')], port, runtimeDir, dataDir: values['data-dir'] || path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local/share'), 'codex-viewer') });
+  const app = await serve({ roots: values.root || [path.join(os.homedir(), 'projects')], port, runtimeDir, dataDir: values['data-dir'] || path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local/share'), 'codex-viewer'), restart: process.execve ? state => restartProcess(app, state) : undefined });
   console.log(`Codex Viewer: ${app.launchUrl}`);
   for (const signal of ['SIGINT', 'SIGTERM'] as const) process.once(signal, () => { void app.stop().then(() => process.exit()); });
 }

@@ -1,7 +1,12 @@
 import type { Obj, PendingRequest } from './protocol.ts';
+import { elicitationFields, externalUrl } from './mcp-apps.ts';
 
 export type ApprovalChoice = { id: string; label: string; description?: string; detail?: string; result: Obj };
 export function approvalChoices(request: Pick<PendingRequest, 'method' | 'params' | 'windows'>): ApprovalChoice[] {
+  if (request.method === 'mcpServer/elicitation/request') {
+    const supported = request.params.mode === 'url' ? !!externalUrl(request.params.url) : !!elicitationFields(request.params);
+    return (supported ? ['accept', 'decline', 'cancel'] : ['decline', 'cancel']).map(id => ({ id, label: id === 'accept' ? '提交' : id === 'decline' ? '拒绝' : '取消', result: { action: id, content: null, _meta: null } }));
+  }
   const p = request.params, command = request.method === 'item/commandExecution/requestApproval';
   const permissions = request.method === 'item/permissions/requestApproval';
   const question = request.method === 'item/tool/requestUserInput';

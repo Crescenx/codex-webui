@@ -69,14 +69,17 @@ export async function localFile(target:string,cwd:string,roots:string[]) {
   if(!roots.some(r=>inside(r,p)))throw new HttpError(403,'文件超出授权目录');
   // Preview/open only visible project files, never hidden credentials or configuration stores.
   if([requested,p].some(v=>v.split(path.sep).some(s=>s.startsWith('.'))))throw new HttpError(403,'不打开隐藏或敏感配置文件');
-  if(! (await stat(p)).isFile())throw new HttpError(400,'引用不是普通文件');
+  const info=await stat(p);
+  if(!info.isFile()&&!info.isDirectory())throw new HttpError(400,'引用不是普通文件或文件夹');
   return {path:p,line,column};
 }
 export async function previewFile(file:{path:string;line:number;column:number}) {
   const handle=await open(file.path,constants.O_RDONLY|constants.O_NOFOLLOW);
   let text:string;
   try {
-    const s=await handle.stat(); if(!s.isFile()||s.size>256*1024)throw new HttpError(413,'仅预览不超过 256 KiB 的文本文件');
+    const s=await handle.stat();
+    if(s.isDirectory())return {...file,kind:'directory' as const,start:1,totalLines:0,lines:[]};
+    if(!s.isFile()||s.size>256*1024)throw new HttpError(413,'仅预览不超过 256 KiB 的文本文件');
     const data=Buffer.alloc(256*1024+1);const {bytesRead}=await handle.read(data,0,data.length,0);
     if(bytesRead>256*1024)throw new HttpError(413,'文件过大');
     if(data.subarray(0,bytesRead).includes(0))throw new HttpError(415,'不预览二进制文件');
@@ -103,6 +106,22 @@ export async function imageFile(file: { path: string }) {
     return { data, mime };
   } finally { await handle.close(); }
 }
-export async function openEditor(file:{path:string;line:number;column:number}) {
-  await exec('code',['--reuse-window','--goto',`${file.path}:${file.line}:${file.column}`],{timeout:15000,maxBuffer:16384,shell:false});
+export async function openDefault(file:{path:string;line:number;column:number},reveal=false) {
+  try {
+    const options={timeout:30000,maxBuffer:1024*1024,shell:false};
+    const wsl=!!process.env.WSL_DISTRO_NAME||/microsoft/i.test(os.release());
+    if(wsl||process.platform==='win32') {
+      const target=wsl?(await exec('wslpath',['-w',file.path],options)).stdout.trim():file.path;
+      // Pass only encoded path data to PowerShell; line/column belong to the text preview.
+      const script=`$ErrorActionPreference = 'Stop'\n$target = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(target).toString('base64')}'))\n`+
+        (reveal?`Start-Process -FilePath explorer.exe -ArgumentList ('/select,"' + $target + '"')`:'Start-Process -FilePath $target');
+      await exec('powershell.exe',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],options);
+    } else if(process.platform==='darwin')await exec('open',reveal?['-R',file.path]:[file.path],options);
+    else await exec('xdg-open',[reveal?path.dirname(file.path):file.path],options);
+  } catch (error) {
+    const e = error as NodeJS.ErrnoException & { killed?: boolean };
+    if (e.killed && e.code !== 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') throw new HttpError(504,'系统打开命令超时，窗口可能已经打开，请先检查桌面');
+    if (e.code === 'ENOENT') throw new HttpError(502,'找不到系统打开命令，请检查 Viewer 后台服务的 PATH');
+    throw new HttpError(502,reveal?'无法在文件夹中显示，请检查系统环境':'无法使用系统默认应用打开，请检查文件关联和系统环境');
+  }
 }

@@ -53,7 +53,7 @@ async function pick() {
   finally { if (controller === job) picking.value = false; }
 }
 async function create() {
-  if (!folders.value.path || creating.value || loading.value || picking.value || optionsLoading.value || error.value) return; creating.value = true;
+  if (!folders.value.path || creating.value || loading.value || picking.value || error.value) return; creating.value = true;
   const opened = controller;
   const valid = () => opened === controller && !opened?.signal.aborted;
   try {
@@ -66,7 +66,7 @@ onBeforeUnmount(close);
 defineExpose({ show });
 </script>
 <template>
-  <dialog id="folder-dialog" ref="dialog" aria-labelledby="folder-title" @close="!dialog?.open && close()"><form method="dialog"><button class="close quiet" aria-label="关闭">✕</button></form><h2 id="folder-title">新建任务</h2>
+  <dialog id="folder-dialog" class="workspace-dialog" ref="dialog" aria-labelledby="folder-title" @close="!dialog?.open && close()"><header class="dialog-header"><h2 id="folder-title">新建任务</h2><button type="button" class="quiet" aria-label="关闭" @click="dialog?.close()">关闭</button></header><div class="dialog-body">
     <template v-if="!fixedDirectory">
     <p class="subtle">选择 Windows 本地文件夹，或浏览 WSL 中的项目。</p>
     <button id="folder-native" class="primary" :disabled="picking || loading || creating" @click="pick">{{ picking ? '请在系统窗口中选择…' : '浏览本地文件夹…' }}</button>
@@ -88,6 +88,6 @@ defineExpose({ show });
       <p id="new-context-help" class="subtle">{{ contextReason || '通过笔记和历史检索延续长任务；仅用于此会话，创建后固定。' }}</p>
       <p v-if="optionsError" class="subtle" role="status">配置加载失败：{{ optionsError }} <button type="button" class="quiet" @click="loadOptions(folders.path!)">重试</button></p>
     </fieldset>
-    <div class="dialog-actions"><span v-if="!fixedDirectory" class="subtle">{{ picking ? '取消系统选择器即可返回' : '任务将在所选目录中运行' }}</span><button id="folder-select" :disabled="!folders.path || creating || loading || picking || optionsLoading || !!error" @click="create">{{ fixedDirectory ? '新建任务' : '在此新建任务' }}</button></div>
+    </div><div class="dialog-actions"><span v-if="!fixedDirectory" class="subtle">{{ picking ? '取消系统选择器即可返回' : '任务将在所选目录中运行' }}</span><button id="folder-select" :disabled="!folders.path || creating || loading || picking || !!error" @click="create">{{ creating ? '正在新建…' : optionsLoading ? '使用项目默认设置新建' : fixedDirectory ? '新建任务' : '在此新建任务' }}</button></div>
   </dialog>
 </template>

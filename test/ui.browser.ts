@@ -7,7 +7,7 @@ import { AppServer } from '../server/adapter.ts';
 
 async function keyboardFocus(page:Page) {
   await page.locator('#conversation').focus();
-  for (const id of ['model','effort','mode','skills-button','prompt']) {
+  for (const id of ['model','effort','mode','skills-button','goal-button','settings-toggle','prompt']) {
     await page.keyboard.press('Tab');
     const target=page.locator('#'+id);
     await expect(target).toBeFocused();
@@ -52,16 +52,17 @@ test('Chinese file links display, preview, copy and open native paths after Mark
   const relative = '树洞/中文 空格.md', literal = '树洞/记录%20.md';
   for (const file of [relative, literal]) await writeFile(path.join(root, file), '第一行\n目标行\n第三行');
   const opened: { path: string; line: number; column: number }[] = [];
+  const revealed: typeof opened = [];
   const app = await serve({ roots: [root], dataDir: dir + '/data', runtimeDir: dir + '/run', port: 0,
-    adapter: new AppServer({ command: process.execPath, args: [path.resolve('test/fake-codex.ts')] }), editor: async file => { opened.push(file); } });
+    adapter: new AppServer({ command: process.execPath, args: [path.resolve('test/fake-codex.ts')] }), opener: async (file,reveal) => { (reveal?revealed:opened).push(file); } });
   try {
     await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: app.origin });
     await page.goto(app.launchUrl);
     const { thread } = await (await page.request.post(app.origin + '/api/threads', { headers: { origin: app.origin }, data: { cwd: root } })).json();
     await page.goto(app.origin + '/#' + thread.id);
-    const source = `[中文绝对](<${root}/${relative}:2:3>)\n\n[编码相对][ref]\n\n[百分号](<${encodeURI(literal)}:2>)\n\n[ref]: <${encodeURI(relative)}#L3>`;
+    const source = `[中文绝对](<${root}/${relative}:2:3>)\n\n[编码相对][ref]\n\n[百分号](<${encodeURI(literal)}:2>)\n\n[文件夹](<${root}/树洞>)\n\n[ref]: <${encodeURI(relative)}#L3>`;
     await expect(page.locator('#send')).toBeEnabled(); await page.locator('#prompt').fill('render-markdown\n' + source); await page.locator('#send').click();
-    const links = page.locator('.assistant a[data-file]'); await expect(links).toHaveCount(3); await expect(page.locator('#send')).toBeEnabled();
+    const links = page.locator('.assistant a[data-file]'); await expect(links).toHaveCount(4); await expect(page.locator('#send')).toBeEnabled();
     const cases = [
       { target: `${root}/${relative}:2:3`, path: path.join(root, relative), line: 2, column: 3 },
       { target: relative + '#L3', path: path.join(root, relative), line: 3, column: 1 },
@@ -76,12 +77,29 @@ test('Chinese file links display, preview, copy and open native paths after Mark
       await card.getByRole('button', { name: '复制路径 / URL', exact: true }).click();
       expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(item.target);
       if (index === 0) await page.screenshot({ path: 'test-results/viewer-chinese-paths.png', fullPage: true });
-      await card.getByRole('button', { name: '在 VS Code 打开', exact: true }).click();
+      if (index === 0) {
+        await page.route('**/api/files/open', route => route.fulfill({ status: 504, json: { error: '系统打开命令超时，窗口可能已经打开，请先检查桌面' } }));
+        await card.getByRole('button', { name: '使用系统默认应用打开', exact: true }).click(); await expect(page.locator('#error')).toContainText('窗口可能已经打开');
+        await page.unroute('**/api/files/open');
+      }
+      await card.getByRole('button', { name: '使用系统默认应用打开', exact: true }).click();
+      await card.getByRole('button', { name: '在文件夹中显示', exact: true }).click();
+      await expect.poll(()=>revealed.length).toBe(index+1);
+      await expect(page.locator('#error')).toBeHidden();
       await expect.poll(() => opened.length).toBe(index + 1); await page.keyboard.press('Escape');
     }
     expect(opened).toEqual(cases.map(({ target, ...file }) => file));
+    expect(revealed).toEqual(opened);
     await links.first().click({ modifiers: ['Control'] }); await expect.poll(() => opened.length).toBe(4);
     expect(opened[3]).toEqual(opened[0]);
+    await links.nth(3).click();const folderCard=page.locator('.reference-card');
+    await expect(folderCard.locator('pre')).toHaveText('文件夹，可使用系统默认应用打开。');
+    await expect(folderCard.locator('code')).toHaveText(path.join(root,'树洞'));
+    await folderCard.getByRole('button',{name:'使用系统默认应用打开',exact:true}).click();
+    await expect.poll(()=>opened.length).toBe(5);expect(opened[4]).toEqual({path:path.join(root,'树洞'),line:1,column:1});
+    await folderCard.getByRole('button',{name:'在文件夹中显示',exact:true}).click();
+    await expect.poll(()=>revealed.length).toBe(4);expect(revealed[3]).toEqual(opened[4]);
+    await page.keyboard.press('Escape');
     await page.getByRole('button', { name: '复制 Markdown', exact: true }).click();
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(source);
     const selected = await links.first().evaluate(el => {
@@ -92,11 +110,65 @@ test('Chinese file links display, preview, copy and open native paths after Mark
   } finally { await app.stop(); await rm(dir, { recursive: true, force: true }); }
 });
 
+test('reasoning summaries group while streaming and expand after completion, reload and in a second tab', async ({ page, context }, testInfo) => {
+  const dir = await mkdtemp('/tmp/viewer-reasoning-');
+  const adapter = new AppServer({ command: process.execPath, args: [path.resolve('test/fake-codex.ts')] });
+  const app = await serve({ roots: [dir], dataDir: dir + '/data', runtimeDir: dir + '/run', port: 0, adapter });
+  try {
+    await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+    await page.setViewportSize({ width: 1920, height: 1080 }); await page.goto(app.launchUrl);
+    await page.locator('#welcome-new').click(); await page.getByRole('button', { name: '▱ ' + dir, exact: true }).click(); await page.locator('#folder-select').click();
+    await expect(page.locator('#send')).toBeEnabled(); await page.locator('#prompt').fill('reasoning-stream'); await page.locator('#send').click();
+    const reasoning = page.locator('.activity[data-kind="reasoning"]');
+    await expect(reasoning.locator('.activity-title')).toHaveText('思考中');
+    await expect(reasoning.locator('.reasoning-summary')).toHaveText('Preparing parallel preflight');
+    await expect(reasoning.locator('summary, pre')).toHaveCount(0);
+    await expect(reasoning.locator('strong')).toHaveCSS('font-weight', '400');
+    const second = await context.newPage(); await second.goto(page.url());
+    const other = second.locator('.activity[data-kind="reasoning"]');
+    await expect(other.locator('.reasoning-summary')).toHaveText('Preparing parallel preflight');
+    const threadId = new URL(page.url()).hash.slice(1);
+    const turnId = await reasoning.first().evaluate(el => el.closest<HTMLElement>('[data-turn-id]')!.dataset.turnId!);
+    await adapter.call('mock/release', { threadId, turnId });
+    for (const card of [reasoning, other]) {
+      await expect(card).toHaveCount(2);
+      await expect(card.locator('.activity-title')).toHaveText('思考中');
+      await expect(card.locator('.reasoning-summary p')).toHaveText(['Preparing parallel preflight', 'Check literal *.py and 2 * 3.', 'Monitoring preflight validation', 'Cancelling read-only scan']);
+    }
+    const firstKey = await reasoning.first().evaluate(el => el.closest<HTMLElement>('[data-row-key]')!.dataset.rowKey);
+    await adapter.call('mock/release', { threadId, turnId });
+    for (const tab of [page, second]) {
+      const toggle = tab.locator('.trace-toggle'); await expect(toggle).toHaveAttribute('aria-expanded', 'false'); await toggle.click();
+    }
+    for (const card of [reasoning, other]) {
+      await expect(card).toHaveCount(3); // The empty native reasoning item adds no extra label or summary.
+      await expect(card.locator('.activity-title')).toHaveText('思考');
+      await expect(card.locator('.activity-state')).toHaveCount(0);
+      await expect(card.locator('.reasoning-summary').last()).toContainText('Keeping preflight serial');
+      await expect(card.locator('summary, pre')).toHaveCount(0);
+    }
+    expect(await reasoning.first().evaluate(el => el.closest<HTMLElement>('[data-row-key]')!.dataset.rowKey)).toBe(firstKey);
+    await expect(page.locator('#stop')).toBeHidden(); await page.reload();
+    await expect(page.locator('#send')).toBeEnabled(); await page.locator('#conversation').evaluate(el => { el.scrollTop = 0; });
+    await page.locator('.trace-toggle').click();
+    await expect(reasoning.locator('.activity-title')).toHaveText('思考');
+    await expect(reasoning.locator('.reasoning-summary p')).toHaveText(['Preparing parallel preflight', 'Check literal *.py and 2 * 3.', 'Monitoring preflight validation', 'Cancelling read-only scan', 'Keeping preflight serial']);
+    await reasoning.locator('.reasoning-summary').first().evaluate(el => {
+      const range = document.createRange(); range.selectNodeContents(el); getSelection()!.removeAllRanges(); getSelection()!.addRange(range);
+    });
+    await page.keyboard.press('Control+c');
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe('Preparing parallel preflight\n\nCheck literal `*.py` and 2 * 3.\n\nMonitoring preflight validation');
+    await page.evaluate(() => getSelection()!.removeAllRanges());
+    await page.screenshot({ path: testInfo.outputPath('reasoning-summary-1920.png') });
+    await second.close();
+  } finally { await app.stop(); await rm(dir, { recursive: true, force: true }); }
+});
+
 test('render, source copy, upload, approval and reconnect', async ({page,context}) => {
   const dir = await mkdtemp(path.join(os.tmpdir(),'viewer-browser-')); const root=path.join(dir,'project'); await mkdir(root);
   await writeFile(path.join(root,'sample.py'),'first line\ntarget line\nthird line');
   const opened:string[]=[];
-  const app = await serve({roots:[root],dataDir:path.join(dir,'data'),runtimeDir:path.join(dir,'run'),port:0,adapter:new AppServer({command:process.execPath,args:[path.resolve('test/fake-codex.ts')]}),editor:async f=>{opened.push(`${f.path}:${f.line}`);}});
+  const app = await serve({roots:[root],dataDir:path.join(dir,'data'),runtimeDir:path.join(dir,'run'),port:0,adapter:new AppServer({command:process.execPath,args:[path.resolve('test/fake-codex.ts')]}),opener:async f=>{opened.push(`${f.path}:${f.line}`);}});
   try {
     await context.grantPermissions(['clipboard-read','clipboard-write'],{origin:app.origin});
     await page.goto(app.launchUrl);
@@ -118,8 +190,8 @@ test('render, source copy, upload, approval and reconnect', async ({page,context
     await page.locator('#model').selectOption('mock-fast');await page.locator('#effort').selectOption('high');await page.locator('#mode').selectOption('plan');
     await expect(page.locator('#settings-state')).toContainText('已生效：mock · medium · 普通');
     await expect(page.locator('#settings-state')).toContainText('下一轮：mock-fast · high · Plan');
-    await page.locator('#skills-button').click();await page.getByRole('button',{name:'全局：已启用',exact:true}).click();await expect(page.getByRole('button',{name:'用于本轮',exact:true})).toBeDisabled();
-    await page.getByRole('button',{name:'全局：已禁用',exact:true}).click();await expect(page.getByRole('button',{name:'用于本轮',exact:true})).toBeEnabled();await page.getByRole('button',{name:'用于本轮',exact:true}).click();
+    await page.locator('#skills-button').click();await page.getByRole('button',{name:'管理启停',exact:true}).click();await page.getByRole('button',{name:'全局：已启用',exact:true}).click();await page.getByRole('button',{name:'全部',exact:true}).click();await expect(page.getByRole('button',{name:'已禁用',exact:true})).toBeDisabled();await page.getByRole('button',{name:'管理启停',exact:true}).click();
+    await page.getByRole('button',{name:'全局：已禁用',exact:true}).click();await page.getByRole('button',{name:'全部',exact:true}).click();await expect(page.getByRole('button',{name:'用于本轮',exact:true})).toBeEnabled();await page.getByRole('button',{name:'用于本轮',exact:true}).click();
     await page.screenshot({path:'test-results/viewer-skills.png',fullPage:true});
     await page.getByRole('button',{name:'关闭 Skills',exact:true}).click();
     await expect(page.locator('#selected-skills')).toContainText('sample-skill');
@@ -154,8 +226,9 @@ test('render, source copy, upload, approval and reconnect', async ({page,context
     page.on('dialog',()=>{throw new Error('Unexpected confirmation dialog');}); await page.getByRole('button',{name:'允许本次 Windows 操作',exact:true}).click();
     await expect(page.locator('.katex')).toBeVisible(); await expect(page.locator('.markdown table')).toBeVisible();
     await expect(page.locator('#threads .project')).toHaveCount(1);
-    await expect(page.locator('.activity').filter({hasText:'思考结束'})).toHaveCount(1);
-    await expect(page.locator('details.activity').filter({hasText:'思考结束'})).toHaveCount(0);
+    await page.locator('.trace-toggle').first().click();
+    await expect(page.locator('.activity[data-kind="reasoning"] .activity-title')).toHaveText('思考');
+    await expect(page.locator('details.activity[data-kind="reasoning"]')).toHaveCount(0);
     for (const header of await page.locator('.tool .message-header').all()) await expect(header).toBeHidden();
     await expect(page.locator('.markdown strong').filter({hasText:'错误的成功判定'})).toHaveCount(1);
     const emphasis=page.locator('.markdown strong').filter({hasText:'错误的成功判定'});
@@ -192,6 +265,7 @@ test('render, source copy, upload, approval and reconnect', async ({page,context
     await page.reload(); await expect(page.locator('.katex')).toBeVisible();await expect(page.locator('#model')).toBeEnabled();
     await expect(page.locator('.markdown pre code')).toHaveCSS('font-size','13.5px');
     await expect(page.locator('.markdown pre .hljs-keyword')).toContainText('const');
+    await page.locator('.trace-toggle').first().click();
     const command=page.locator('.activity[data-kind="commandExecution"]');
     await expect(command).toHaveCount(1);
     await expect(command.locator('.activity-command')).toHaveCSS('white-space','nowrap');
@@ -253,16 +327,39 @@ test('bracket math streams, renders and copies its exact original source',async(
     await body.locator('.katex-display').nth(1).scrollIntoViewIfNeeded();
     await page.screenshot({path:'test-results/viewer-bracket-math-1920.png',fullPage:true});
     await page.reload();await expect(page.locator('.assistant .katex')).toHaveCount(4);
+    const equation = '寻找第一对典型变量的问题是\n\\[\n\\max_{a,b}\\operatorname{Corr}(Xa,Yb)\n=\n\\frac{a^T(X^TY)b}{\\|Xa\\|_2\\,\\|Yb\\|_2}\n\\]\n后续正文。';
+    await expect(page.locator('#send')).toBeEnabled();await page.locator('#prompt').fill('render-markdown\n'+equation);await page.locator('#send').click();
+    const reply=page.locator('.assistant .markdown').last();
+    await expect(reply.locator('.katex-display')).toHaveCount(1);
+    await expect(reply.locator('h1, h2, .katex-error')).toHaveCount(0);
+    await expect(reply.locator('p').first()).toHaveCSS('font-size','17px');
+    await expect(reply.locator('p').first()).toHaveCSS('font-family', /Constantia.*serif/);
+    await reply.scrollIntoViewIfNeeded();await page.screenshot({path:'test-results/viewer-equation-heading-fix.png'});
   }finally{await app.stop();await rm(dir,{recursive:true,force:true});}
 });
 
 test('two concurrent conversations retain both user inputs across reordered events, switching and reload',async({page,context})=>{
+  const errors: string[] = []; page.on('pageerror', e => errors.push(e.message));
   const dir=await mkdtemp(path.join(os.tmpdir(),'viewer-concurrent-'));
   const adapter=new AppServer({command:process.execPath,args:[path.resolve('test/fake-codex.ts')],env:{...process.env,VIEWER_FAKE_REORDER_TURNS:'1'}});
   const app=await serve({roots:[dir],dataDir:path.join(dir,'data'),runtimeDir:path.join(dir,'run'),port:0,adapter});
   try {
-    await page.goto(app.launchUrl);const second=await context.newPage();await second.goto(app.origin);
+    await page.goto(app.launchUrl);const second=await context.newPage(); second.on('pageerror', e => errors.push(e.message)); await second.goto(app.origin);
     const pages=[page,second];const ids:string[]=[];
+    const verifyInputs = async (p: Page, count: number) => {
+      await p.bringToFront();
+      await p.getByRole('button', { name: '查找对话', exact: true }).click();
+      await p.getByRole('searchbox', { name: '查找当前对话' }).fill('并发实验');
+      await expect(p.locator('.conversation-search [role="status"]')).toHaveText(`1 / ${count} 条`);
+      const positions: number[] = [];
+      for (let i = 0; i < count; i++) {
+        await expect(p.locator('.message.search-hit')).toHaveText('你并发实验');
+        positions.push(await p.locator('.message.search-hit').evaluate(el => Number(el.parentElement!.dataset.index)));
+        if (i + 1 < count) await p.getByRole('button', { name: '下一条匹配' }).click();
+      }
+      expect(new Set(positions).size).toBe(count); expect(positions).toEqual([...positions].sort((a, b) => a - b));
+      await p.getByRole('button', { name: '关闭查找' }).click();
+    };
     for(const p of pages) {
       await p.locator('#welcome-new').click();await p.getByRole('button',{name:'▱ '+dir,exact:true}).click();await p.locator('#folder-select').click();
       await expect(p.locator('#send')).toBeEnabled();ids.push(new URL(p.url()).hash.slice(1));
@@ -271,32 +368,32 @@ test('two concurrent conversations retain both user inputs across reordered even
       for(const p of pages)await p.locator('#prompt').fill('并发实验');
       await Promise.all(pages.map(p=>p.locator('#send').click()));
       for(const p of pages) {
-        await expect(p.locator('.message.user')).toHaveCount(round);
         await expect(p.locator('.message.user').last()).toHaveText('你并发实验');
         await expect(p.locator('#stop')).toBeHidden();
         await expect(p.locator('#send')).toBeEnabled();
-        await expect(p.locator('.message.user')).toHaveCount(round);
-        const order=await p.locator('.message.user, .message.assistant').evaluateAll(els=>els.map(el=>el.classList.contains('user')?'user':'assistant'));
-        expect(order).toEqual(Array.from({length:round},()=>['user','assistant']).flat());
+        await verifyInputs(p, round);
         const snap=await p.evaluate(async(id)=>{const r=await fetch('/api/threads/'+id);return r.json();},new URL(p.url()).hash.slice(1));
         expect(snap.thread.turns.flatMap((t:{items:{type:string}[]})=>t.items).filter((i:{type:string})=>i.type==='userMessage')).toHaveLength(round);
+        expect(snap.thread.turns.flatMap((t:{items:{type:string}[]})=>t.items).filter((i:{type:string})=>['userMessage','agentMessage'].includes(i.type)).map((i:{type:string})=>i.type)).toEqual(Array.from({length:round},()=>['userMessage','agentMessage']).flat());
+        if (await p.locator('#latest').isVisible()) await p.locator('#latest').click();
       }
     }
     // Select the other conversation without a page reload, then recover from a full reload.
     await page.locator('#threads .thread:not(.selected)').click();await expect(page).toHaveURL(app.origin+'/#'+ids[1]);
-    await expect(page.locator('.message.user')).toHaveCount(2);
+    await verifyInputs(page, 2);
     // Reproduce an already-damaged in-memory cache without altering persisted history.
     const broken=structuredClone((await adapter.call('thread/read',{threadId:ids[1],includeTurns:true})).thread) as {id:string;turns:{items:{type:string}[]}[]};
     broken.turns.at(-1)!.items=broken.turns.at(-1)!.items.filter(i=>i.type!=='userMessage');
     adapter.emit('notice',{method:'thread/started',params:{thread:broken}});
     const before=await page.evaluate(async(id)=>(await (await fetch('/api/threads/'+id)).json()).thread,ids[1]);
     expect(before.turns.flatMap((t:{items:{type:string}[]})=>t.items).filter((i:{type:string})=>i.type==='userMessage')).toHaveLength(1);
-    await page.reload();await expect(page.locator('.message.user')).toHaveCount(2);
+    await page.reload();await verifyInputs(page, 2);
     await expect(page.locator('.message.user').last()).toHaveText('你并发实验');
     await page.locator('.message.user').last().scrollIntoViewIfNeeded();
     await page.screenshot({path:'test-results/viewer-concurrent-messages.png',fullPage:true});
-    await second.close();
-  }finally{await app.stop();await rm(dir,{recursive:true,force:true});}
+    await second.close(); expect(errors).toEqual([]);
+  } catch (error) { console.log({ errors, state: await page.evaluate(() => ({ ready: document.readyState, focus: document.hasFocus(), visibility: document.visibilityState, error: document.querySelector('#error')?.textContent, tools: document.querySelector('.conversation-tools')?.getBoundingClientRect().toJSON() })) }); throw error; }
+  finally{await app.stop();await rm(dir,{recursive:true,force:true});}
 });
 
 test('automatic titles, manual rename, cross-tab events and external refresh',async({page,context})=>{
@@ -340,7 +437,7 @@ test('automatic titles, manual rename, cross-tab events and external refresh',as
     await page.locator('#rename').click();await page.locator('#thread-name').fill('跨页同步标题');await page.locator('#name-save').click();
     await expect(second.locator('#title')).toHaveText('跨页同步标题');await expect(second.locator('#threads strong')).toHaveText('跨页同步标题');
     externalName='来自 CLI 的标题';
-    await page.locator('#refresh').click();await expect(page.locator('#title')).toHaveText(externalName);await expect(page.locator('#threads strong')).toHaveText(externalName);
+    await page.locator('.sidebar-more').evaluate(el => el.setAttribute('open', ''));await page.locator('#refresh').click();await expect(page.locator('#title')).toHaveText(externalName);await expect(page.locator('#threads strong')).toHaveText(externalName);
     await expect(page.locator('.katex')).toBeVisible();
     await page.reload();await expect(page.locator('#title')).toHaveText(externalName);
     await page.setViewportSize({width:1920,height:844});await page.locator('#rename').click();
@@ -358,7 +455,7 @@ for (const width of [1280,1920]) test(`long content, streaming and manual readin
   await writeFile(path.join(root,'sample.py'),'first line\ntarget line\nthird line');
   const adapter=new AppServer({command:process.execPath,args:[path.resolve('test/fake-codex.ts')]});
   let deltas=0;adapter.on('notice',n=>{if(n.method==='item/agentMessage/delta')deltas++;});
-  const app=await serve({roots:[root],dataDir:path.join(dir,'data'),runtimeDir:path.join(dir,'run'),port:0,adapter,editor:async()=>{throw new Error('Editor must not open');}});
+  const app=await serve({roots:[root],dataDir:path.join(dir,'data'),runtimeDir:path.join(dir,'run'),port:0,adapter,opener:async()=>{throw new Error('Editor must not open');}});
   try {
     await page.goto(app.launchUrl);
     await page.screenshot({path:`test-results/viewer-home-${width}.png`,fullPage:true});
@@ -375,7 +472,7 @@ for (const width of [1280,1920]) test(`long content, streaming and manual readin
     await page.getByRole('button',{name:'▱ '+root,exact:true}).click();await page.locator('#folder-select').click();
     await expect(page.locator('#model')).toBeEnabled();await keyboardFocus(page);
     await expect(page.locator('#model')).toHaveAttribute('title','模型-'+ 'long-model-name-'.repeat(8));
-    await fitsViewport(page,'.topbar, .controls, #model, #settings-state');
+    await fitsViewport(page,'.topbar, .controls, #model');
     await page.locator('#skills-button').click();await expect(page.locator('.skill-row')).toHaveCount(24);
     await fitsViewport(page,'#skills-dialog, .skill-row');
     await page.screenshot({path:`test-results/viewer-many-skills-${width}.png`,fullPage:true});

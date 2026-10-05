@@ -21,6 +21,7 @@ test('desktop rails show nested agents, live read-only records and watchdogs wit
     await adapter.call('mock/agent', { threadId: 'review', id: 'tests', name: '回归验证', prompt: '验证状态变化、刷新和读取失败。' });
     await adapter.call('mock/agent', { threadId: thread.id, id: 'docs', name: '文档整理', prompt: '核对功能说明。' });
     await adapter.call('mock/agentEvent', { threadId: 'docs', delta: '已核对现有说明。', status: 'completed' });
+    await page.getByRole('button', { name: '展开 Subagents', exact: true }).click();
     const node = (id: string) => page.locator(`[data-agent-id="${id}"]`);
     await expect(node('review')).toContainText('执行中'); await expect(node('tests')).toContainText('由 实现检查 派发'); await expect(node('docs')).toContainText('已完成');
     expect((await node('tests').boundingBox())!.x).toBeGreaterThan((await node('review').boundingBox())!.x);
@@ -38,8 +39,8 @@ test('desktop rails show nested agents, live read-only records and watchdogs wit
     expect(await page.evaluate(() => navigator.clipboard.readText())).toContain('**状态更新**');
     for (const width of [1920, 2560]) {
       await page.setViewportSize({ width, height: 1080 });
-      const left = (await page.locator('#watchdog-rail').boundingBox())!, main = (await page.locator('main').boundingBox())!, right = (await page.locator('#subagents').boundingBox())!;
-      expect(left.x + left.width).toBeLessThanOrEqual(main.x); expect(main.x + main.width).toBeLessThanOrEqual(right.x); expect(left.y).toBe(main.y);
+      const main = (await page.locator('main').boundingBox())!, right = (await page.locator('#subagents').boundingBox())!;
+      expect(main.x + main.width).toBeLessThanOrEqual(right.x);await expect(page.locator('#watchdog-rail')).toBeHidden();
       expect(await page.locator('main .watchdog-strip').count()).toBe(0);
       await page.screenshot({ path: `test-results/subagents-${width}.png` });
     }
@@ -50,9 +51,8 @@ test('desktop rails show nested agents, live read-only records and watchdogs wit
     await node('tests').click(); await expect(page.locator('.agent-detail [role="alert"]')).toContainText('暂时无法读取');
     await expect(node('review')).toBeVisible(); await page.unroute('**/api/threads/tests?refresh=1');
     await page.locator('.agent-detail').getByRole('button', { name: '重试', exact: true }).click(); await expect(page.locator('.agent-detail [role="alert"]')).toHaveCount(0);
-    await page.getByRole('button', { name: '收起 Subagents', exact: true }).click(); await expect(page.locator('#subagents')).toHaveCSS('width', '36px');
-    await page.getByRole('button', { name: '收起 Watchdogs', exact: true }).click();
-    await page.reload(); await expect(page.locator('#subagents')).toHaveCSS('width', '36px'); await expect(page.locator('#watchdog-rail')).toHaveCSS('width', '36px');
+    await page.getByRole('button', { name: '收起 Subagents', exact: true }).click(); await expect(page.locator('#subagents')).toBeHidden();
+    await page.reload(); await expect(page.locator('#subagents')).toBeHidden(); await expect(page.locator('#watchdog-rail')).toBeHidden();
     await page.getByRole('button', { name: '展开 Subagents', exact: true }).click(); await expect(node('tests')).toBeVisible();
     await node('review').click(); await expect(page.locator('#agent-conversation')).toContainText('已补齐持久化结果');
     expect(errors).toEqual([]);

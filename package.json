@@ -19,6 +19,9 @@
     "open": "node scripts/open.ts"
   },
   "dependencies": {
+    "@modelcontextprotocol/client": "^2.0.0",
+    "@modelcontextprotocol/ext-apps": "^2.0.0",
+    "@tanstack/vue-virtual": "^3.13.38",
     "ansi-regex": "^6.3.0",
     "ansi-to-html": "^0.7.2",
     "hast-util-to-html": "^9.0.5",

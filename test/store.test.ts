@@ -40,6 +40,52 @@ function setup(nextCursor: string | null = null) {
 }
 const tick = () => new Promise<void>(resolve => setImmediate(resolve));
 
+test('creation uses its snapshot and sends with effective settings while optional reads are pending', async () => {
+  const h = setup();
+  try {
+    await tick(); h.held.add('/threads'); h.held.add('/controls?threadId=new');
+    const creating = h.store.createThread('/tmp/new', { model: 'mock', contextManagement: true });
+    h.pending.find(p => p.path === '/threads' && p.data)!.job.resolve({ ...snapshot('new', 1), thread: { ...thread('new'), contextManagement: true }, models: [{ ...catalog.models[0], supportsExperimentalContext: true }] });
+    await creating;
+    assert.equal(h.store.state.currentId, 'new'); assert.equal(h.store.state.hydrating, false);
+    assert.equal(h.calls.some(p => p.endsWith('/open')), false);
+    assert.equal(h.store.state.listLoading, true); assert.equal(h.store.draft.value?.loading, true);
+    assert.equal(h.store.canSend.value, true);
+    h.store.setText('send before optional reads');
+    const sending = h.store.send();
+    const submit = h.pending.find(p => p.path === '/threads/new/turns')!;
+    assert.equal((submit.data as { settings?: unknown }).settings, undefined);
+    submit.job.resolve({ turn: { id: 'first', status: 'inProgress', items: [] } }); await tick();
+    h.pending.find(p => p.path === '/threads/new/open')!.job.resolve({ ...snapshot('new', 2), thread: { ...thread('new'), contextManagement: true } }); await sending;
+    h.store.setSettings({ model: 'mock', effort: null, mode: 'default' });
+    assert.equal(h.store.canSend.value, false, 'changed settings still wait for validation options');
+    h.pending.find(p => p.path.startsWith('/controls'))!.job.resolve({ ...catalog, models: [{ ...catalog.models[0], supportsExperimentalContext: true }] });
+    h.pending.find(p => p.path === '/threads' && !p.data)!.job.reject(new Error('history unavailable'));
+    await tick();
+    assert.equal(h.store.state.listError, 'history unavailable'); assert.equal(h.store.canSend.value, true);
+    assert.equal(h.store.current.value?.id, 'new');
+  } finally { h.store.dispose(); }
+});
+
+test('creation resyncs a snapshot overtaken by live events and does not steal a changed selection', async () => {
+  const h = setup();
+  try {
+    await tick();
+    const creating = h.store.createThread('/tmp/new');
+    h.emit({ method: 'thread/started', params: { thread: thread('new') }, seq: 1 });
+    h.emit({ method: 'thread/name/updated', params: { threadId: 'new', threadName: 'newer title' }, seq: 3 });
+    h.pending[0].job.resolve(snapshot('new', 2)); await tick();
+    assert.equal(h.store.state.hydrating, true);
+    h.pending.find(p => p.path === '/threads/new/open')!.job.resolve({ ...snapshot('new', 3), thread: { ...thread('new'), name: 'newer title' } });
+    await creating; assert.equal(h.store.current.value?.name, 'newer title');
+    const another = h.store.createThread('/tmp/another');
+    const selecting = h.store.selectThread('b');
+    h.pending.find(p => p.path === '/threads/b/open')!.job.resolve(snapshot('b', 3)); await selecting;
+    h.pending.findLast(p => p.path === '/threads' && p.data)!.job.resolve(snapshot('another', 4)); await another;
+    assert.equal(h.store.state.currentId, 'b'); assert.equal(h.calls.includes('/threads/another/open'), false);
+  } finally { h.store.dispose(); }
+});
+
 test('agent detail ignores old selections and merges concurrent live output without touching the parent draft', async () => {
   const h = setup();
   try {
@@ -89,7 +135,7 @@ test('restart is single-use while pending; failed replacement preserves drafts a
     h.emit({ method: 'viewer/restarting', params: {}, seq: 1 });
     h.emit({ method: 'viewer/offline', params: { restarting: true }, seq: 2 });
     assert.equal(h.store.state.restarting, true);
-    h.emit({ method: 'viewer/offline', params: { restarting: false }, seq: 3 });
+    h.emit({ method: 'viewer/restartFailed', params: {}, seq: 3 });
     assert.equal(h.store.state.restarting, false);
     h.pending.find(p => p.path === '/restart')!.job.reject(new Error('replacement failed')); await restart;
     assert.equal(h.store.state.restartPending, false);
@@ -97,9 +143,74 @@ test('restart is single-use while pending; failed replacement preserves drafts a
     assert.equal(h.store.state.error, 'replacement failed');
     assert.equal(h.calls.some(p => p.endsWith('/turns')), false);
     const retry = h.store.restartBackend();
-    h.pending.filter(p => p.path === '/restart')[1].job.resolve({ ok: true }); await retry;
-    assert.equal(h.store.state.toast, 'Codex 后端已重启');
+    h.pending.filter(p => p.path === '/restart')[1].job.resolve({ ok: true, epoch: 'one' }); await retry;
+    assert.equal(h.store.state.restartPending, true);assert.notEqual(h.store.state.toast,'整个后端已重启并重新连接');
+    h.emit({method:'viewer/resync',params:{online:true}},'one');
+    assert.equal(h.store.state.restartPending,true);
+    h.emit({method:'viewer/resync',params:{online:false}},'two');
+    assert.equal(h.store.state.restartPending,true);
+    h.emit({method:'viewer/online',params:{},seq:1},'two');
+    h.pending.filter(p=>p.path==='/threads/a/open').at(-1)!.job.resolve(snapshot('a'));await tick();
+    assert.equal(h.store.state.toast, '整个后端已重启并重新连接');assert.equal(h.store.state.restartPending,false);
+    assert.equal(h.store.draft.value?.text,'keep this draft');
   } finally { h.store.dispose(); }
+});
+
+test('restart waits for a new backend epoch and times out without replaying the request', async t => {
+  t.mock.timers.enable({apis:['setTimeout']});
+  const h=setup();
+  try {
+    const selected=h.store.selectThread('a');h.pending[0].job.resolve(snapshot('a'));await selected;await tick();
+    h.store.setText('retain after timeout');
+    const restart=h.store.restartBackend();h.pending.find(p=>p.path==='/restart')!.job.resolve({ok:true,epoch:'one'});await restart;
+    t.mock.timers.tick(60_000);
+    assert.match(h.store.state.error,/60 秒/);assert.equal(h.store.state.restartPending,false);assert.equal(h.store.state.connection,'重连未完成 · 请检查服务');
+    assert.equal(h.store.draft.value?.text,'retain after timeout');assert.equal(h.calls.filter(p=>p==='/restart').length,1);
+    assert.equal(h.calls.some(p=>p.endsWith('/turns')),false);
+  } finally {h.store.dispose();}
+});
+
+test('pagination coalesces callers, retains its cursor after failure and exposes retry state', async () => {
+  const h = setup('page2');
+  try {
+    await tick();
+    const first = h.store.loadThreads(true), joined = h.store.loadThreads(true);
+    assert.equal(h.pending.length, 1); assert.equal(h.store.state.moreLoading, true);
+    h.pending[0].job.reject(new Error('page unavailable'));
+    await Promise.all([first, joined]);
+    assert.equal(h.store.state.moreLoading, false); assert.equal(h.store.state.cursor, 'page2');
+    assert.equal(h.store.state.listError, 'page unavailable');
+    const retry = h.store.loadThreads(true);
+    h.pending[1].job.resolve({ data: [thread('c')], nextCursor: 'page3' }); await retry;
+    assert.equal(h.store.state.listError, ''); assert.equal(h.store.state.cursor, 'page3');
+    assert.deepEqual([...h.store.state.ids], ['a', 'b', 'c']);
+  } finally { h.store.dispose(); }
+});
+
+test('401 stops SSE and further requests, marks login expired and retains the draft', async () => {
+  const h = setup();
+  const originalFetch = globalThis.fetch, descriptor = Object.getOwnPropertyDescriptor(globalThis, 'EventSource');
+  let calls = 0, closed = 0;
+  let events: Events | undefined;
+  class Events { constructor() { events = this; } onerror?: () => void; close() { closed++; } addEventListener() {} }
+  Object.defineProperty(globalThis, 'EventSource', { configurable: true, value: Events });
+  globalThis.fetch = async () => { calls++; return new Response(JSON.stringify({ error: 'expired' }), { status: 401 }); };
+  const client = createClient();
+  try {
+    const open = h.store.selectThread('a'); h.pending[0].job.resolve(snapshot('a')); await open;
+    h.store.setText('keep this unsent draft');
+    client.subscribe(() => {}, () => {}, h.store.report);
+    events!.onerror!(); events!.onerror!(); await tick();
+    assert.equal(closed, 1); assert.equal(h.store.state.authExpired, true);
+    assert.equal(h.store.state.connection, '登录已过期'); assert.equal(h.store.canSend.value, false);
+    assert.equal(h.store.draft.value?.text, 'keep this unsent draft');
+    events!.onerror!();
+    await assert.rejects(client.request('/threads')); assert.equal(calls, 1);
+    client.subscribe(() => {}, () => {}, h.store.report);
+  } finally {
+    client.dispose(); h.store.dispose(); globalThis.fetch = originalFetch;
+    if (descriptor) Object.defineProperty(globalThis, 'EventSource', descriptor); else Reflect.deleteProperty(globalThis, 'EventSource');
+  }
 });
 
 test('metadata refresh preserves loaded pages and an independent pagination request', async () => {
@@ -221,6 +332,23 @@ test('skills changes refresh only the current catalog; switching reloads the oth
     assert.deepEqual(h.calls, ['/controls?threadId=b']);
     const back = h.store.selectThread('a'); h.pending[2].job.resolve(snapshot('a', 1)); await back;
     assert.equal(h.calls.filter(p => p.startsWith('/controls')).at(-1), '/controls?threadId=a');
+  } finally { h.store.dispose(); }
+});
+
+test('cached selection is immediate, gates sends until revalidated, and retains history and drafts on failure', async () => {
+  const h = setup();
+  try {
+    const cached = snapshot('a'); cached.thread.turns = [{ id: 'history', status: 'completed', items: [{ id: 'answer', type: 'agentMessage', text: 'cached answer' }] }];
+    const first = h.store.selectThread('a'); h.pending[0]!.job.resolve(cached); await first; h.store.setText('draft A');
+    const second = h.store.selectThread('b'); assert.equal(h.store.state.currentId, 'b'); h.pending[1]!.job.resolve(snapshot('b')); await second;
+    const back = h.store.selectThread('a');
+    assert.equal(h.store.current.value?.id, 'a'); assert.equal(h.store.current.value?.turns?.[0]?.items[0]?.text, 'cached answer');
+    assert.equal(h.store.draft.value?.text, 'draft A'); assert.equal(h.store.canSend.value, false);
+    h.emit({ method: 'item/agentMessage/delta', params: { threadId: 'a', turnId: 'history', itemId: 'answer', delta: '+live' }, seq: 1 });
+    h.pending[2]!.job.reject(new Error('read failed')); await back;
+    assert.equal(h.store.canSend.value, false); assert.equal(h.store.current.value?.turns?.[0]?.items[0]?.text, 'cached answer+live');
+    const retry = h.store.selectThread('a'); h.pending[3]!.job.resolve({ ...cached, seq: 1 }); await retry;
+    assert.equal(h.store.canSend.value, true); assert.equal(h.store.draft.value?.text, 'draft A'); assert.equal(h.store.draft.value?.readError, '');
   } finally { h.store.dispose(); }
 });
 
@@ -350,21 +478,22 @@ test('async question answers require explicit completion, preserve drafts, and d
     assert.deepEqual(data.attachments, []); assert.deepEqual(data.skills, []);
     assert.match(String(data.text), /比较范围？[\s\S]*图的用途？[\s\S]*DeepSeek[\s\S]*用于组会/);
     h.pending[1].job.reject(new Error('回答发送失败')); assert.equal(await failed, false);
-    assert.equal(h.store.questionStatus(question), ''); assert.deepEqual(h.store.draft.value?.answers.question, ['DeepSeek','用于组会']);
+    assert.deepEqual(h.store.questionResponse(question), { status: '', text: '' }); assert.deepEqual(h.store.draft.value?.answers.question, ['DeepSeek','用于组会']);
     const send = h.store.send('steer', question.id);
     assert.equal(await h.store.send('steer', question.id), false);
     h.pending[2].job.resolve({turnId:'running',messageId:'reply-id'}); await tick();
     h.pending[3].job.resolve(live); assert.equal(await send, true);
-    assert.equal(h.store.questionStatus(question), 'queued'); assert.equal(h.store.draft.value?.text, '另一个任务的草稿');
+    h.store.setAnswer(question.id, 0, '尚未提交的草稿');
+    assert.deepEqual(h.store.questionResponse(question), { status: 'queued', text: '1. DeepSeek\n2. 用于组会' }); assert.equal(h.store.draft.value?.text, '另一个任务的草稿');
     assert.equal(await h.store.send('steer', question.id), false);
     h.emit({method:'item/completed',params:{threadId:'a',turnId:'running',item:{id:'native-reply',clientId:'reply-id',type:'userMessage',content:[{type:'text',text:data.text}]}},seq:1});
-    assert.equal(h.store.questionStatus(question), 'received'); assert.equal(h.store.draft.value?.queued.length, 0);
+    assert.deepEqual(h.store.questionResponse(question), { status: 'received', text: '1. DeepSeek\n2. 用于组会' }); assert.equal(h.store.draft.value?.queued.length, 0);
     // The same question asked later is a new decision, despite matching text.
     const later = {...question,id:'later-question'};
     h.emit({method:'item/completed',params:{threadId:'a',turnId:'running',item:later},seq:2});
-    assert.equal(h.store.questionStatus(later), '');
+    assert.deepEqual(h.store.questionResponse(later), { status: '', text: '' });
     h.emit({method:'item/completed',params:{threadId:'a',turnId:'running',item:{id:'manual',type:'userMessage',content:[{type:'text',text:'我先补充一点背景'}]}},seq:3});
-    assert.equal(h.store.questionStatus(later), 'history');
+    assert.deepEqual(h.store.questionResponse(later), { status: 'history', text: '' });
     const other = h.store.selectThread('b'); h.pending[4].job.resolve(snapshot('b',3)); await other;
     assert.equal(await h.store.send('steer', question.id), false);
     assert.equal(h.store.state.drafts.a.text, '另一个任务的草稿');
@@ -436,4 +565,34 @@ test('flush captures all queued inputs, preserves new typing and reconciles a lo
     h.pending[retryIndex].job.reject(new Error('Codex request timed out')); await retry;
     assert.equal(h.store.draft.value!.text, 'typed during retry'); assert.equal(h.store.canSend.value, false);
   } finally { h.store.dispose(); }
+});
+
+test('goal notifications distinguish continuation from completion and replay clear after a stale snapshot', async () => {
+  const messages: string[] = [];
+  const originalDocument = Object.getOwnPropertyDescriptor(globalThis, 'document'), originalNotification = Object.getOwnPropertyDescriptor(globalThis, 'Notification');
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: { hidden: true, addEventListener() {}, removeEventListener() {} } });
+  Object.defineProperty(globalThis, 'Notification', { configurable: true, value: class { static permission = 'granted'; constructor(text: string) { messages.push(text); } } });
+  const h = setup();
+  const goal = { threadId: 'a', objective: 'finish task', status: 'active' as const, tokenBudget: 1000, tokensUsed: 100, timeUsedSeconds: 10, createdAt: 1, updatedAt: 2 };
+  try {
+    const opening = h.store.selectThread('a'); h.pending[0].job.resolve({ ...snapshot('a'), thread: { ...thread('a'), goal: null } }); await opening;
+    h.store.setText('keep draft');
+    h.emit({ method: 'thread/goal/updated', params: { threadId: 'a', goal }, seq: 1 });
+    h.emit({ method: 'turn/completed', params: { threadId: 'a', turn: { id: 'first', status: 'completed', items: [] } }, seq: 2 });
+    assert.deepEqual(messages, []);
+    h.emit({ method: 'thread/goal/updated', params: { threadId: 'a', turnId: 'second', goal: { ...goal, status: 'complete', updatedAt: 3 } }, seq: 3 });
+    h.emit({ method: 'turn/completed', params: { threadId: 'a', turn: { id: 'second', status: 'completed', items: [] } }, seq: 4 });
+    assert.deepEqual(messages, ['Goal 已完成']);
+    const refresh = h.store.refreshGoal();
+    h.emit({ method: 'thread/goal/cleared', params: { threadId: 'a' }, seq: 6 });
+    h.pending.findLast(p => p.path === '/threads/a/open')!.job.resolve({ ...snapshot('a', 5), thread: { ...thread('a'), goal } });
+    await refresh;
+    assert.equal(h.store.current.value!.goal, null); assert.equal(h.store.draft.value!.text, 'keep draft');
+    h.emit({ method: 'thread/goal/updated', params: { threadId: 'b', goal: { ...goal, threadId: 'b' } }, seq: 7 });
+    assert.equal(h.store.current.value!.goal, null); assert.equal(h.store.state.entities.b.goal!.status, 'active');
+  } finally {
+    h.store.dispose();
+    if (originalDocument) Object.defineProperty(globalThis, 'document', originalDocument); else Reflect.deleteProperty(globalThis, 'document');
+    if (originalNotification) Object.defineProperty(globalThis, 'Notification', originalNotification); else Reflect.deleteProperty(globalThis, 'Notification');
+  }
 });

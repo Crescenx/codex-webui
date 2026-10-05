@@ -139,6 +139,10 @@ const maps = new WeakMap<HTMLElement, Map<string,string>>();
 export function renderInto(el: HTMLElement, rendered: Rendered, preserved = new Map<string, HTMLElement>()) {
   const focused = document.activeElement;
   const template = document.createElement('template'); template.innerHTML = rendered.html;
+  // Browsers reuse mounted images with the same URL even with no-store; files can be overwritten.
+  for (const img of template.content.querySelectorAll<HTMLImageElement>('img[src^="/api/files/image?"]')) {
+    img.setAttribute('src', img.getAttribute('src') + '&v=' + crypto.randomUUID());
+  }
   for (const slot of template.content.querySelectorAll<HTMLElement>('[data-mermaid]')) {
     const existing = preserved.get(slot.dataset.mermaid!);
     if (existing) slot.replaceWith(existing);
@@ -161,6 +165,10 @@ function overlaps(range: Range, node: Node | globalThis.Node): boolean {
 }
 
 export function selectedSource(range: Range, scope: HTMLElement): string {
+  const start = range.startContainer instanceof Element ? range.startContainer : range.startContainer.parentElement;
+  const selectedCode = start?.closest('pre code');
+  // Highlight spans are presentation only: a selection inside code is literal text.
+  if (selectedCode && selectedCode.contains(range.endContainer)) return range.toString();
   const output: string[] = [];
   const block = new Set(['P','DIV','SECTION','ARTICLE','H1','H2','H3','H4','H5','H6','LI','BLOCKQUOTE','PRE','TR']);
   let separator = '';
@@ -172,7 +180,20 @@ export function selectedSource(range: Range, scope: HTMLElement): string {
     if (node instanceof HTMLElement && node.dataset.atom) {
       const owner = node.closest<HTMLElement>('.markdown');
       const raw = owner ? maps.get(owner)?.get(node.dataset.atom) : undefined;
-      if (raw !== undefined) { append(raw); return; }
+      if (raw !== undefined) {
+        const code = node.matches('pre code') ? node : node.querySelector('pre code');
+        if (code && overlaps(range, code)) {
+          const part = document.createRange(); part.selectNodeContents(code);
+          const startsInside = range.compareBoundaryPoints(Range.START_TO_START, part) > 0;
+          const endsInside = range.compareBoundaryPoints(Range.END_TO_END, part) < 0;
+          if (startsInside || endsInside) {
+            if (startsInside) part.setStart(range.startContainer, range.startOffset);
+            if (endsInside) part.setEnd(range.endContainer, range.endOffset);
+            boundary(); append(part.toString()); boundary(); return;
+          }
+        }
+        append(raw); return;
+      }
     }
     if (node.nodeType === globalThis.Node.TEXT_NODE) {
       const begin = range.startContainer === node ? range.startOffset : 0;

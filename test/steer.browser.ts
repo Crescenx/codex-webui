@@ -43,7 +43,13 @@ test('running composer can queue or interrupt, preserves failed drafts and fits 
     await expect(page.locator('#queued-inputs .queued-input')).toHaveCount(2);
     await page.unroute('**/api/threads/*/turns');await page.locator('#send-interrupt').click();
     await expect(page.locator('.message.user').filter({hasText:'replacement'})).toHaveCount(1);await expect(page.locator('#stop')).toBeHidden();
-    await page.reload();await expect(page.locator('.message.user').filter({hasText:'first queued'})).toHaveCount(1);await expect(page.locator('.message.user').filter({hasText:'replacement'})).toHaveCount(1);
+    await page.reload();await expect(page.locator('#send')).toBeEnabled();
+    // Virtualized history mounts earlier messages when scrolled into view.
+    await expect.poll(async () => {
+      await page.locator('#conversation').evaluate(el=>{el.scrollTop=0;});
+      return page.locator('.message.user').filter({hasText:'first queued'}).count();
+    }).toBe(1);
+    await page.locator('#conversation').evaluate(el=>{el.scrollTop=el.scrollHeight;});await expect(page.locator('.message.user').filter({hasText:'replacement'})).toHaveCount(1);
     await expect(page.locator('#queued-inputs')).toHaveCount(0);
     const combined = page.locator('.message.user').filter({hasText:'replacement'});
     await expect(combined).toContainText('keep if not received');await expect(combined).toContainText('second pending');

@@ -3,6 +3,7 @@ import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { object, string } from '../shared/protocol.ts';
 import type { Obj } from '../shared/protocol.ts';
+import { createWireMonitor, modelCaptureLog } from './wire-monitor.ts';
 
 export class AppServer extends EventEmitter {
   child?: ChildProcessWithoutNullStreams;
@@ -16,8 +17,8 @@ export class AppServer extends EventEmitter {
     super(); this.options = privateOptions;
   }
   private options: { command?: string; args?: string[]; cwd?: string; env?: NodeJS.ProcessEnv };
-  private launchOptions: { args?: string[]; env?: NodeJS.ProcessEnv } = {};
-  configureLaunch(options: { args?: string[]; env?: NodeJS.ProcessEnv }) {
+  private launchOptions: { args?: string[]; env?: NodeJS.ProcessEnv; captureModels?: boolean } = {};
+  configureLaunch(options: { args?: string[]; env?: NodeJS.ProcessEnv; captureModels?: boolean }) {
     if (this.child) throw new Error('Configure launch before starting Codex');
     // Per-instance additions survive reconnects, but are not inherited by forked workers.
     this.launchOptions = options;
@@ -32,8 +33,10 @@ export class AppServer extends EventEmitter {
   private async launch(): Promise<void> {
     this.buffer = '';
     const args = [...(this.options.args || ['app-server', '--listen', 'stdio://']), ...(this.launchOptions.args || [])];
+    const env = { ...(this.options.env || process.env), ...this.launchOptions.env };
+    if (this.launchOptions.captureModels) { env.RUST_LOG = `${env.RUST_LOG || 'error'},${modelCaptureLog}`; env.NO_COLOR = '1'; }
     const child = spawn(this.options.command || 'codex', args, {
-      cwd: this.options.cwd, env: { ...(this.options.env || process.env), ...this.launchOptions.env }, stdio: ['pipe', 'pipe', 'pipe'], shell: false,
+      cwd: this.options.cwd, env, stdio: ['pipe', 'pipe', 'pipe'], shell: false,
     });
     this.child = child;
     child.stdout.setEncoding('utf8');
@@ -47,8 +50,12 @@ export class AppServer extends EventEmitter {
         if (line.trim()) this.receive(line);
       }
     });
-    // Never send stderr (which may contain host paths or credentials) to the browser.
-    child.stderr.resume();
+    // Raw stderr is never persisted or forwarded. Only allowlisted, ID-joined model metadata leaves the parser.
+    if (this.launchOptions.captureModels) {
+      const consume = createWireMonitor(n => { if (this.child === child) this.emit('notice', n); });
+      child.stderr.setEncoding('utf8');
+      child.stderr.on('data', (chunk: string) => { if (this.child === child) consume(chunk); });
+    } else child.stderr.resume();
     child.stdin.on('error', () => {});
     const failed = (error: Error) => {
       if (this.child !== child) return;
@@ -58,7 +65,7 @@ export class AppServer extends EventEmitter {
     };
     child.once('error', failed);
     child.once('exit', () => failed(new Error('Codex process exited; previous actions will not be replayed')));
-    await this.raw('initialize', { clientInfo: { name: 'codex_viewer', title: 'Codex Viewer', version: '0.2.0' }, capabilities: { experimentalApi: true } });
+    await this.raw('initialize', { clientInfo: { name: 'codex_viewer', title: 'Codex Viewer', version: '0.2.0' }, capabilities: { experimentalApi: true, extensions: { 'io.modelcontextprotocol/ui': { mimeTypes: ['text/html;profile=mcp-app'] } } } });
     this.send({ method: 'initialized' });
     this.emit('online');
   }

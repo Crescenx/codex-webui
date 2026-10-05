@@ -3,6 +3,7 @@ import type { Preview } from './api.ts';
 export function installLinks(scope:HTMLElement,threadId:()=>string|undefined,report:(e:unknown)=>void, io: {
   preview: (id:string,target:string,signal?:AbortSignal)=>Promise<Preview>;
   openFile: (id:string,target:string)=>Promise<unknown>;
+  revealFile: (id:string,target:string)=>Promise<unknown>;
 }) {
   const listeners = new AbortController(); let preview:AbortController|undefined;
   const card=document.createElement('div');card.className='reference-card';card.setAttribute('popover','auto');document.body.append(card);
@@ -18,12 +19,14 @@ export function installLinks(scope:HTMLElement,threadId:()=>string|undefined,rep
     const target=el.dataset.file||el.dataset.external!;
     card.replaceChildren();const title=document.createElement('code');title.textContent=target;card.append(title);
     card.append(act('复制路径 / URL',()=>{void navigator.clipboard.writeText(target).catch(report);}));
-    if(el.dataset.file)card.append(act('在 VS Code 打开',()=>{void open(target,id).catch(report);}));
+    if(el.dataset.file)card.append(act('使用系统默认应用打开',()=>{void open(target,id).catch(report);}));
+    if(el.dataset.file)card.append(act('在文件夹中显示',()=>{void io.revealFile(id,target).catch(report);}));
     card.showPopover();const rect=el.getBoundingClientRect();
     card.style.left=Math.max(8,Math.min(rect.left,window.innerWidth-560))+'px';card.style.top=Math.max(8,Math.min(rect.bottom+8,window.innerHeight-330))+'px';
     if(el.dataset.file) {
       const pre=document.createElement('pre');pre.textContent='读取预览…';card.append(pre);
       try {const result=await io.preview(id,target,signal);if(gen!==generation || signal.aborted)return;
+        if(result.kind==='directory'){title.textContent=result.path;pre.textContent='文件夹，可使用系统默认应用打开。';return;}
         pre.replaceChildren();result.lines.forEach((line:string,i:number)=>{const span=document.createElement('span');const n=result.start+i;span.textContent=`${n}  ${line}\n`;if(n===result.line)span.className='target-line';pre.append(span);});
         title.textContent=`${result.path}:${result.line}`;
       }catch(e){if(gen===generation && !signal.aborted)pre.textContent=e instanceof Error?e.message:String(e);}

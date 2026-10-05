@@ -53,6 +53,6 @@ test('subagent reads include nested history, enforce directory boundaries and ne
     const snapshot = await (await get('/threads/child?refresh=1')).json();
     assert.equal(snapshot.thread.turns.at(-1).items.at(-1).text, 'live output');
     assert.equal((await get('/threads/outside?refresh=1')).status, 403);
-    assert.ok(calls.every(m => ['thread/read', 'thread/list'].includes(m)), calls.join(','));
+    assert.ok(calls.every(m => ['thread/read', 'thread/list', 'thread/goal/get'].includes(m)), calls.join(','));
   } finally { await app.stop(); await rm(dir, { recursive: true, force: true }); }
 });

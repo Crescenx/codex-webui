@@ -5,21 +5,31 @@ export type Catalog = { models: Model[]; modes: { mode: string; name: string }[]
 export type Snapshot = { thread: Thread; requests: PendingRequest[]; uncertain?: boolean; seq: number };
 export type Update = Notice & { seq?: number };
 export type Directories = { roots: string[]; path: string | null; directories: string[] };
-export type Preview = { path: string; line: number; start: number; lines: string[] };
+export type Preview = { path: string; line: number; start: number; lines: string[]; kind?: 'directory' };
 
 // Each application owns its connection and pending reads; importing this module does nothing.
 export function createClient() {
   const pending = new Set<AbortController>();
   let events: EventSource | undefined;
   let disposed = false;
+  let unauthorized: Error | undefined;
+  let report: (error: unknown) => void = () => {};
+  let checkingConnection = false;
   async function request<T>(path: string, init: RequestInit = {}, signal?: AbortSignal): Promise<T> {
     if (disposed) throw new DOMException('Client disposed', 'AbortError');
+    if (unauthorized) throw unauthorized;
     const controller = new AbortController();
     pending.add(controller);
     try {
       const response = await fetch('/api' + path, { ...init, signal: signal ? AbortSignal.any([controller.signal, signal]) : controller.signal });
       const result = await response.json();
-      if (!response.ok) throw new Error(result.error || response.statusText);
+      if (!response.ok) {
+        const error = Object.assign(new Error(result.error || response.statusText), { status: response.status });
+        if (response.status === 401 && !unauthorized) {
+          unauthorized = error; events?.close(); report(error);
+        }
+        throw error;
+      }
       return result;
     } finally { pending.delete(controller); }
   }
@@ -32,11 +42,21 @@ export function createClient() {
     },
     subscribe(update: (notice: Update, eventId: string) => void, connection: (online: boolean) => void, error: (error: unknown) => void) {
       events?.close();
-      if (disposed) return;
+      report = error;
+      if (disposed || unauthorized) return;
       events = new EventSource('/api/events');
-      events.onopen = () => connection(true);
-      events.onerror = () => connection(false);
+      events.onopen = () => { if (!disposed && !unauthorized) connection(true); };
+      events.onerror = () => {
+        if (disposed || unauthorized) return;
+        connection(false);
+        // EventSource hides HTTP status. Probe an existing, cheap authenticated read.
+        if (!checkingConnection) {
+          checkingConnection = true;
+          void request('/watchdogs').catch(() => {}).finally(() => { checkingConnection = false; });
+        }
+      };
       events.addEventListener('update', event => {
+        if (disposed || unauthorized) return;
         try { const message = event as MessageEvent; update(JSON.parse(message.data), message.lastEventId); }
         catch (e) { error(e); }
       });

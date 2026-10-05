@@ -48,5 +48,20 @@ test('local Markdown images load, fit widescreen and copy source within file per
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.reload(); await expect(page.locator('.assistant .markdown img')).toHaveCount(2);
     await expect.poll(() => page.locator('.assistant .markdown img').evaluateAll(nodes => nodes.every(n => (n as HTMLImageElement).naturalWidth > 0))).toBe(true);
+    // Overwriting a referenced file must reach a new reply even while its old image is mounted.
+    const replacement = await page.evaluate(() => {
+      const canvas = document.createElement('canvas'); canvas.width = 2; canvas.height = 1;
+      const ctx = canvas.getContext('2d')!; ctx.fillStyle = 'blue'; ctx.fillRect(0, 0, 2, 1);
+      return canvas.toDataURL('image/png').split(',')[1]!;
+    });
+    await writeFile(path.join(root, file), Buffer.from(replacement, 'base64'));
+    const latestSource = `![最新图片](<${root}/${file}>)`;
+    await page.locator('#prompt').fill('render-markdown\n' + latestSource); await page.locator('#send').click();
+    await expect(page.locator('#stop')).toBeHidden();
+    const latest = page.locator('.assistant .markdown img[alt="最新图片"]');
+    await expect(latest).toHaveCount(1);
+    await expect.poll(() => latest.evaluate(el => (el as HTMLImageElement).naturalWidth)).toBe(2);
+    await page.reload();
+    await expect.poll(() => page.locator('.assistant .markdown img').evaluateAll(nodes => nodes.length === 3 && nodes.every(n => (n as HTMLImageElement).naturalWidth === 2))).toBe(true);
   } finally { await app.stop(); await rm(dir, { recursive: true, force: true }); }
 });
