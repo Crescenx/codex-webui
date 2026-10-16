@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { viewerDocument, viewerWindow, viewerRoot } from '../environment.ts';
+
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue';
 import { AppBridge } from '@modelcontextprotocol/ext-apps/app-bridge';
 import type { CallToolResult, ReadResourceResult, ListResourcesResult, ListResourceTemplatesResult, Transport, JSONRPCMessage } from '@modelcontextprotocol/client';
@@ -134,9 +136,9 @@ async function open() {
       } else transport.onmessage?.(event.data as JSONRPCMessage);
     };
     const transport: Transport = {
-      async start() { window.addEventListener('message', receive); },
+      async start() { viewerWindow().addEventListener('message', receive); },
       async send(data) { source.postMessage(data, origin); },
-      async close() { window.removeEventListener('message', receive); transport.onclose?.(); },
+      async close() { viewerWindow().removeEventListener('message', receive); transport.onclose?.(); },
     };
     await current.connect(transport);
     if (disposed || run !== generation) { await current.close(); return; }
@@ -151,8 +153,8 @@ const externalLink = ref('');
 function cancelDownload() { resolveDownload?.({ isError: true }); resolveDownload = undefined; downloads.value = []; downloadModal.value?.close(); }
 function saveDownload() {
   for (const file of downloads.value) {
-    const url = URL.createObjectURL(file.blob), link = document.createElement('a');
-    link.href = url; link.download = file.name; document.body.append(link); link.click(); link.remove();
+    const url = URL.createObjectURL(file.blob), link = viewerDocument().createElement('a');
+    link.href = url; link.download = file.name; viewerRoot().append(link); link.click(); link.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
   resolveDownload?.({}); resolveDownload = undefined; downloads.value = []; downloadModal.value?.close();

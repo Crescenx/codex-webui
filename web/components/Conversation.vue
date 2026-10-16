@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { viewerDocument, viewerWindow, viewerRoot, isElement, isHTMLElement } from '../environment.ts';
+
 import { computed, defineAsyncComponent, inject, nextTick, onBeforeUnmount, onMounted, provide, ref, shallowRef, toRaw, watch } from 'vue';
 import { defaultRangeExtractor, useVirtualizer } from '@tanstack/vue-virtual';
 import type { DeepReadonly } from 'vue';
@@ -12,12 +14,24 @@ import MessageBody from './MessageBody.vue';
 import ActivityBlock from './ActivityBlock.vue';
 import ReasoningBlock from './ReasoningBlock.vue';
 import QuestionCard from './QuestionCard.vue';
+import ReferenceDialog from './ReferenceDialog.vue';
+import ReferenceCard from './ReferenceCard.vue';
+import { referenceCategory, referenceSelectable } from '../../shared/references.ts';
 const McpAppBlock = defineAsyncComponent(() => import('./McpAppBlock.vue'));
-const emit = defineEmits<{ new: [] }>();
-const props = defineProps<{ thread?: DeepReadonly<Thread>; readonly?: boolean }>();
+const emit = defineEmits<{ new: []; find: [] }>();
+const props = defineProps<{ thread?: DeepReadonly<Thread>; readonly?: boolean; searchInSidebar?:boolean }>();
 const store = useViewer(), current = computed(() => props.readonly ? props.thread : store.current.value);
 const threadId = computed(() => current.value?.id || (props.readonly ? store.state.selectedAgentId : store.state.currentId));
 const targetTurn = computed(() => props.readonly ? '' : store.state.targetTurn);
+const targetItem = computed(() => props.readonly ? '' : store.state.targetItem);
+const referenceDialog=ref<InstanceType<typeof ReferenceDialog>>(), selecting=ref(false), selectedRecords=ref(new Set<string>());
+const selectedTools=computed(()=>allRows.value.filter(r=>selectedRecords.value.has(r.key) && referenceCategory(r.original)==='tool').length);
+function toggleRecord(row:TranscriptRow){const next=new Set(selectedRecords.value);if(next.has(row.key))next.delete(row.key);else next.add(row.key);selectedRecords.value=next;}
+function clearToolRecords(){selectedRecords.value=new Set(allRows.value.filter(r=>selectedRecords.value.has(r.key) && referenceCategory(r.original)!=='tool').map(r=>r.key));}
+function selectedInTrace(key:string){return selectedRecords.value.size?allRows.value.filter(r=>r.trace?.key===key && selectedRecords.value.has(r.key)).length:0;}
+function forwardRecords(){const positions=allRows.value.filter(r=>selectedRecords.value.has(r.key)).map(r=>({turnId:r.turn.id,itemId:r.original.id}));void referenceDialog.value?.showSnapshot(threadId.value,positions);}
+function referenceMessage(item:Item){return item.type==='userMessage'?current.value?.referenceMessages?.find(m=>m.id===item.clientId):undefined;}
+function messageReferences(item:Item){const ids=referenceMessage(item)?.references || [];return current.value?.references?.filter(r=>ids.includes(r.id)) || [];}
 const memory = inject(transcriptMemoryKey)!;
 const reading = memory.reading(threadId.value), follow = ref(reading.follow);
 function project(): TranscriptRow[] {
@@ -63,18 +77,18 @@ const visible = computed(() => {
 });
 let frame = 0, layoutFrame = 0, disposed = false, restoring = true, jumpedTo = '', lastOffset = 0;
 let removeCopy = () => {}, removeLinks = () => {}, resize: ResizeObserver | undefined;
-async function copy(text: string) { try { await navigator.clipboard.writeText(text); store.toast('已复制'); } catch { store.toast('无法访问剪贴板，请选中文字后复制'); } }
-function selected() { const s = getSelection(); return !!s && !s.isCollapsed && !!s.anchorNode && !!conversation.value?.contains(s.anchorNode); }
-function rowKey(node: Node | null) { const el = node instanceof Element ? node : node?.parentElement; return el && conversation.value?.contains(el) ? el.closest<HTMLElement>('[data-row-key]')?.dataset.rowKey || '' : ''; }
+async function copy(text: string) { try { await viewerWindow().navigator.clipboard.writeText(text); store.toast('已复制'); } catch { store.toast('无法访问剪贴板，请选中文字后复制'); } }
+function selected() { const s = viewerWindow().getSelection(); return !!s && !s.isCollapsed && !!s.anchorNode && !!conversation.value?.contains(s.anchorNode); }
+function rowKey(node: Node | null) { const el = isElement(node) ? node : node?.parentElement; return el && conversation.value?.contains(el) ? el.closest<HTMLElement>('[data-row-key]')?.dataset.rowKey || '' : ''; }
 function hold(event?: Event) {
-  const s = getSelection(), a = rows.value.findIndex(r => r.key === rowKey(s?.anchorNode || null)), b = rows.value.findIndex(r => r.key === rowKey(s?.focusNode || null));
+  const s = viewerWindow().getSelection(), a = rows.value.findIndex(r => r.key === rowKey(s?.anchorNode || null)), b = rows.value.findIndex(r => r.key === rowKey(s?.focusNode || null));
   selectionRange.value = selected() && a >= 0 && b >= 0 ? [Math.min(a, b), Math.max(a, b)] : null;
-  const focused = rowKey(event?.type === 'pointerdown' ? event.target as Node : document.activeElement);
-  if (focused || !document.querySelector('dialog[open]')) focusKey.value = focused;
-  heldTrace.value = document.querySelector('dialog[open]') ? allRows.value.find(row => row.key === focusKey.value)?.trace?.key || '' : '';
+  const focused = rowKey(event?.type === 'pointerdown' ? event.target as Node : viewerDocument().activeElement);
+  if (focused || !viewerDocument().querySelector('dialog[open]')) focusKey.value = focused;
+  heldTrace.value = viewerDocument().querySelector('dialog[open]') ? allRows.value.find(row => row.key === focusKey.value)?.trace?.key || '' : '';
   if (event?.type === 'selectionchange' && !selected()) schedule();
 }
-function measure(el: unknown) { virtualizer.value.measureElement(el instanceof HTMLElement ? el : null); }
+function measure(el: unknown) { virtualizer.value.measureElement(isHTMLElement(el) ? el : null); }
 function savePosition() {
   const el = conversation.value; if (!el || restoring) return;
   const v = virtualizer.value.getVirtualItems().find(v => v.end > el.scrollTop);
@@ -113,7 +127,8 @@ async function paint() {
   savePosition(); allRows.value = project();
   await nextTick(); if (disposed) return;
   if (targetTurn.value && targetTurn.value !== jumpedTo) {
-    const index = rows.value.findIndex(row => row.turn.id === targetTurn.value);
+    if(targetItem.value){const found=allRows.value.find(r=>r.turn.id===targetTurn.value && r.original.id===targetItem.value);if(found?.trace)itemView(reading,found.trace.key).open=true;}
+    const index = rows.value.findIndex(row => row.turn.id === targetTurn.value && (!targetItem.value || row.original.id===targetItem.value && !row.traceHeader));
     if (index >= 0) { jumpedTo = targetTurn.value; follow.value = false; jump(index); return; }
   }
   if (restoring && rows.value.length) {
@@ -126,6 +141,7 @@ function schedule() { if (!frame && !disposed) frame = requestAnimationFrame(() 
 watch(() => store.state.revisions[threadId.value], schedule);
 watch(virtualizer, layout);
 watch(targetTurn, () => { jumpedTo = ''; schedule(); });
+watch(targetItem, () => { jumpedTo = ''; schedule(); });
 function scroll() {
   const el = conversation.value; if (!el) return;
   // Allow layout slack while following; after a manual scroll, only resume at the actual bottom.
@@ -134,12 +150,13 @@ function scroll() {
 }
 function manualScroll(event: WheelEvent | KeyboardEvent | PointerEvent) {
   const el = conversation.value; if (!el || el.scrollHeight <= el.clientHeight) return;
-  const editing = event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable]');
-  const readingUp = event instanceof WheelEvent ? event.deltaY < 0 : event instanceof KeyboardEvent ? !editing && ['ArrowUp', 'PageUp', 'Home'].includes(event.key) : event.target === el && event.clientX >= el.getBoundingClientRect().right - (el.offsetWidth - el.clientWidth);
+  const editing = isElement(event.target) && event.target.closest('input, textarea, select, [contenteditable]');
+  const readingUp = 'deltaY' in event ? event.deltaY < 0 : 'key' in event ? !editing && ['ArrowUp', 'PageUp', 'Home'].includes(event.key) : event.target === el && event.clientX >= el.getBoundingClientRect().right - (el.offsetWidth - el.clientWidth);
   if (readingUp) { follow.value = false; restoring = false; }
 }
 function latest() { follow.value = true; restoring = true; virtualizer.value.scrollToEnd(); requestAnimationFrame(() => { if (!disposed) { restoring = false; savePosition(); } }); }
 
+const searchHost=computed(()=>props.searchInSidebar?viewerRoot().querySelector<HTMLElement>('#sidebar-conversation-search'):null);
 const searchOpen = ref(false), query = ref(''), searchInput = ref<HTMLInputElement>(), hitIndex = ref(0);
 const hits = shallowRef<{ key: string; text: string }[]>([]);
 let searchTimer: ReturnType<typeof setTimeout> | undefined;
@@ -169,18 +186,18 @@ function goHit(step: number) {
   if (row.original.type === 'fileChange') view.files = (row.original.changes || []).filter(f => [f.path, f.diff, f.kind.type === 'update' ? f.kind.move_path : ''].join('\n').toLocaleLowerCase().includes(query.value.trim().toLocaleLowerCase())).map(f => f.path);
   follow.value = false; jump(rows.value.findIndex(row => row.key === hit.key));
 }
-function openSearch() { searchOpen.value = true; void nextTick(() => { searchInput.value?.focus(); searchInput.value?.select(); }); }
+function openSearch() { emit('find'); searchOpen.value = true; void nextTick(() => { searchInput.value?.focus(); searchInput.value?.select(); }); }
 function closeSearch() { searchOpen.value = false; query.value = ''; hits.value = []; conversation.value?.focus(); }
 function keys(event: KeyboardEvent) {
-  if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'f' || document.querySelector('dialog[open]')) return;
-  const inAgent = !!(document.activeElement as Element | null)?.closest('.agent-detail');
+  if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'f' || viewerDocument().querySelector('dialog[open]')) return;
+  const inAgent = !!(viewerDocument().activeElement as Element | null)?.closest('.agent-detail');
   if (!!props.readonly !== inAgent || !threadId.value) return;
   event.preventDefault(); openSearch();
 }
 onMounted(() => {
   removeCopy = installCopy(conversation.value!);
   removeLinks = installLinks(conversation.value!, () => threadId.value || undefined, store.report, store);
-  document.addEventListener('selectionchange', hold); document.addEventListener('focusin', hold); document.addEventListener('keydown', keys);
+  viewerDocument().addEventListener('selectionchange', hold); viewerDocument().addEventListener('focusin', hold); viewerDocument().addEventListener('keydown', keys);
   let width = reading.width;
   resize = new ResizeObserver(() => {
     const next = conversation.value?.clientWidth || 0;
@@ -190,21 +207,30 @@ onMounted(() => {
 });
 onBeforeUnmount(() => {
   savePosition(); reading.measurements = virtualizer.value.takeSnapshot();
-  if (selected()) getSelection()?.removeAllRanges();
+  if (selected()) viewerWindow().getSelection()?.removeAllRanges();
   disposed = true; clearTimeout(searchTimer); resize?.disconnect(); mermaid.dispose(); cancelAnimationFrame(frame); cancelAnimationFrame(layoutFrame);
-  document.removeEventListener('selectionchange', hold); document.removeEventListener('focusin', hold); document.removeEventListener('keydown', keys); removeCopy(); removeLinks();
+  viewerDocument().removeEventListener('selectionchange', hold); viewerDocument().removeEventListener('focusin', hold); viewerDocument().removeEventListener('keydown', keys); removeCopy(); removeLinks();
 });
+defineExpose({openSearch});
 </script>
 <template>
-  <div v-if="threadId" class="conversation-tools" data-copy-ignore>
-    <span v-if="!readonly && store.state.hydrating" class="subtle" role="status">正在同步历史…</span>
-    <button v-if="!searchOpen" type="button" class="quiet conversation-find" @click="openSearch">查找对话</button>
-    <div v-else class="conversation-search" role="search" aria-label="查找对话">
+  <div v-if="threadId" :class="searchInSidebar?'conversation-search-portal':'conversation-tools'" data-copy-ignore>
+    <span v-if="!searchInSidebar && !readonly && store.state.hydrating" class="subtle" role="status">正在同步历史…</span>
+    <button v-if="!searchOpen && !searchInSidebar" type="button" class="quiet conversation-find" @click="openSearch">查找对话</button>
+    <div v-if="!readonly && store.draft.value?.catalog.capabilities?.references?.snapshot" class="conversation-reference-actions">
+      <button type="button" class="quiet" :aria-pressed="selecting" @click="selecting=!selecting;selectedRecords=new Set()">{{ selecting?'取消多选':'选择转发' }}</button>
+      <button type="button" class="quiet" :disabled="!store.draft.value?.catalog.capabilities?.references?.session" :title="store.draft.value?.catalog.capabilities?.references?.reason" @click="referenceDialog?.showSession(threadId)">引用此 Session 到…</button>
+    </div>
+    <Teleport :to="searchHost||'body'" :disabled="!searchHost"><div v-if="searchOpen" class="conversation-search" role="search" aria-label="查找对话">
       <input ref="searchInput" v-model="query" type="search" aria-label="查找当前对话" placeholder="查找完整对话记录" @keydown.enter.prevent="goHit($event.shiftKey ? -1 : 1)" @keydown.esc.prevent="closeSearch">
       <span class="subtle" role="status">{{ hits.length ? `${hitIndex + 1} / ${hits.length} 条` : query ? '没有匹配' : '' }}</span>
       <button class="quiet" :disabled="!hits.length" aria-label="上一条匹配" @click="goHit(-1)">↑</button><button class="quiet" :disabled="!hits.length" aria-label="下一条匹配" @click="goHit(1)">↓</button><button class="quiet" aria-label="关闭查找" @click="closeSearch">×</button>
       <p v-if="hits[hitIndex]" class="search-excerpt">{{ hits[hitIndex]!.text }}</p>
-    </div>
+    </div></Teleport>
+  </div>
+  <div v-if="selecting" class="reference-selection-bar" role="region" aria-label="转发选择">
+    <span role="status">已选 {{ selectedRecords.size }} 条 · 其中工具 {{ selectedTools }} 条</span><span class="subtle">默认只选文字；展开工具后可逐条勾选</span>
+    <button v-if="selectedTools" type="button" class="quiet" @click="clearToolRecords">清除所选工具</button><button type="button" :disabled="!selectedRecords.size" @click="forwardRecords">转发到…</button>
   </div>
   <div :id="readonly ? 'agent-conversation' : 'conversation'" class="conversation" :class="{ 'has-history': rows.length }" ref="conversation" tabindex="0" :aria-label="readonly ? '子代理执行记录' : '对话记录'" @scroll="scroll" @pointerdown="hold($event); manualScroll($event)" @wheel.passive="manualScroll" @keydown="manualScroll">
     <div v-if="!current && !readonly && !threadId" class="welcome"><div class="eyebrow">YOUR WORK, IN FOCUS</div><h2>从一个项目开始。</h2><p>选择左侧已有对话，或选择项目目录新建任务。<br>选好项目后，即可设置模型、思考强度、Plan 和 Skills。</p><button id="welcome-new" class="primary" @click="emit('new')">选择项目，新建任务</button></div>
@@ -214,17 +240,25 @@ onBeforeUnmount(() => {
       <div v-for="row in visible" :key="row.key" :ref="measure" class="virtual-row" :data-index="row.virtual.index" :data-row-key="row.key" :style="{ transform: `translateY(${row.virtual.start}px)` }">
         <button v-if="row.traceHeader" type="button" class="quiet trace-toggle" :aria-expanded="row.traceOpen" :data-turn-id="row.turn.id" data-copy-ignore @pointerdown="follow = false" @click="toggleTrace(row)">
           <span aria-hidden="true">{{ row.traceOpen ? '▾' : '▸' }}</span><span>思考与工具</span><span class="subtle">{{ row.trace!.count }} 条<span v-if="row.trace!.active"> · 进行中</span></span><span class="trace-action">{{ row.traceOpen ? '收起' : '展开' }}</span>
+          <strong v-if="selectedInTrace(row.trace!.key)">已选 {{ selectedInTrace(row.trace!.key) }} 条工具记录</strong>
         </button>
         <article v-else class="message" :data-turn-id="row.turn.id" :class="[row.item.type === 'userMessage' ? 'user' : row.message ? 'assistant' : 'tool', { 'trace-item': row.trace, 'reasoning-continues': row.reasoning && row.reasoning.lastKey !== row.key, 'target-turn': row.turn.id === targetTurn, 'search-hit': hits[hitIndex]?.key === row.key }]">
+          <label v-if="selecting && referenceCategory(row.item)" class="record-select" data-copy-ignore><input type="checkbox" :checked="selectedRecords.has(row.key)" :disabled="!referenceSelectable(row.item,row.turn)" @change="toggleRecord(row)"> {{ referenceCategory(row.item)==='tool'?'选择此工具记录':'选择此消息' }}<span v-if="!referenceSelectable(row.item,row.turn)">（仍在生成）</span></label>
           <div class="message-header" data-copy-ignore :hidden="!row.message"><span v-if="row.message">{{ row.item.type === 'userMessage' ? (readonly ? '任务输入' : '你') : row.item.type === 'plan' ? 'Codex · Plan' : 'Codex' }}</span><button v-if="row.item.type === 'agentMessage' || row.item.type === 'plan'" type="button" class="quiet" @click="copy(row.source)">复制 Markdown</button></div>
           <QuestionCard v-if="!readonly && row.item.type === 'agentMessage' && row.item.delivery === 'async' && row.item.questions?.length" :item="row.item" :turn="row.turn" />
-          <MessageBody v-else-if="row.message" :source="row.source" :markdown="row.item.type !== 'userMessage'" :thread-id="threadId" :item-key="row.key" :complete="row.turn.status !== 'inProgress'" @copy="copy" @layout="layout" />
+          <MessageBody v-else-if="row.message" :source="referenceMessage(row.item)?.text ?? row.source" :markdown="row.item.type !== 'userMessage'" :thread-id="threadId" :item-key="row.key" :complete="row.turn.status !== 'inProgress'" @copy="copy" @layout="layout" />
           <ReasoningBlock v-else-if="row.reasoning" :item="row.item" :turn="row.turn" :group="row.reasoning" :thread-id="threadId" :item-key="row.key" @copy="copy" @layout="layout" />
           <McpAppBlock v-else-if="row.item.type === 'mcpToolCall'" :item="row.item" :turn="row.turn" :thread-id="threadId" :cwd="current?.cwd" :view="row.view" :readonly="readonly" @copy="copy" @active="retainApp(row.key, $event)" @layout="layout" />
           <ActivityBlock v-else :item="row.item" :turn="row.turn" :cwd="current?.cwd" :view="row.view" @copy="copy" />
+          <ReferenceCard v-for="r in messageReferences(row.item)" :key="r.id" :reference="r" @toggle="layout" />
         </article>
       </div>
     </div>
   </div>
   <button :id="readonly ? 'agent-latest' : 'latest'" class="quiet latest" :hidden="follow" @click="latest">↓ 回到最新</button>
+  <ReferenceDialog v-if="!readonly" ref="referenceDialog" />
 </template>
+<style scoped>
+.reference-selection-bar{display:flex;align-items:center;gap:12px;padding:8px 20px;flex-wrap:wrap;border-bottom:1px solid var(--line,#d9d1c4)}.record-select{display:flex;align-items:center;gap:8px;padding:8px 0;font-size:13px}.record-select input{accent-color:var(--accent,#8d6545)}
+.conversation-reference-actions{display:flex;justify-content:flex-end;gap:8px}
+</style>

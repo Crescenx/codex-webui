@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { viewerDocument, viewerWindow, viewerRoot } from '../environment.ts';
+
 import { inject, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { renderInto, renderMarkdown } from '../render.ts';
 import { mermaidKey, type DiagramView } from '../mermaid.ts';
@@ -16,7 +18,7 @@ watch(() => props.threadId, clear);
 function paint() {
   timer = undefined;
   if (!body.value) return;
-  const selection = getSelection();
+  const selection = viewerWindow().getSelection();
   if (selection && !selection.isCollapsed && selection.anchorNode && body.value.closest('.conversation')?.contains(selection.anchorNode)) return;
   pending = false;
   if (!props.markdown) { clear(); body.value.textContent = props.source; emit('layout'); return; }
@@ -36,9 +38,9 @@ function paint() {
   }
   for (const pre of body.value.querySelectorAll('pre:not(.mermaid-block pre)')) {
     const code = pre.querySelector('code'); if (!code) continue;
-    const toolbar = document.createElement('div'); toolbar.className = 'code-toolbar'; toolbar.dataset.copyIgnore = '';
-    const language = document.createElement('span'); language.textContent = [...code.classList].find(c => c.startsWith('language-'))?.slice(9) || '代码';
-    const button = document.createElement('button'); button.type = 'button'; button.className = 'code-copy quiet'; button.textContent = '复制代码'; button.onclick = () => emit('copy', code.textContent || '');
+    const toolbar = viewerDocument().createElement('div'); toolbar.className = 'code-toolbar'; toolbar.dataset.copyIgnore = '';
+    const language = viewerDocument().createElement('span'); language.textContent = [...code.classList].find(c => c.startsWith('language-'))?.slice(9) || '代码';
+    const button = viewerDocument().createElement('button'); button.type = 'button'; button.className = 'code-copy quiet'; button.textContent = '复制代码'; button.onclick = () => emit('copy', code.textContent || '');
     toolbar.append(language, button); pre.prepend(toolbar);
   }
   if (props.complete) cache.clear();
@@ -53,7 +55,7 @@ function schedule() {
   if (wait <= 0) paint(); else timer = setTimeout(paint, wait);
 }
 watch([body, () => props.source, () => props.markdown, () => props.threadId, () => props.complete], () => { pending = true; schedule(); }, { flush: 'post' });
-onMounted(() => document.addEventListener('selectionchange', schedule));
-onBeforeUnmount(() => { clear(); document.removeEventListener('selectionchange', schedule); });
+onMounted(() => viewerDocument().addEventListener('selectionchange', schedule));
+onBeforeUnmount(() => { clear(); viewerDocument().removeEventListener('selectionchange', schedule); });
 </script>
 <template><div ref="body" class="markdown"></div></template>

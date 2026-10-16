@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { viewerDocument, viewerWindow, viewerRoot } from '../environment.ts';
+
 import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from 'vue';
 import type { Item, Turn } from '../../shared/protocol.ts';
 import { activity } from '../activity.ts';
@@ -9,8 +11,8 @@ const props = defineProps<{ item: Item; turn: Turn; cwd?: string; view: ItemView
 const emit = defineEmits<{ copy: [text: string] }>();
 const shown = shallowRef(props.item), openPaths = computed(() => new Set(props.view.files)), zoom = ref(''), dialog = ref<HTMLDialogElement>();
 const layout = ref('split');
-try { if (localStorage.getItem('viewer-diff-layout') === 'unified') layout.value = 'unified'; } catch {}
-watch(layout, value => { try { localStorage.setItem('viewer-diff-layout', value); } catch {} });
+try { if (viewerWindow().localStorage.getItem('viewer-diff-layout') === 'unified') layout.value = 'unified'; } catch {}
+watch(layout, value => { try { viewerWindow().localStorage.setItem('viewer-diff-layout', value); } catch {} });
 const files = computed(() => Array.isArray(shown.value.changes) ? shown.value.changes.map(parseFileDiff) : []);
 const selected = computed(() => files.value.find(f => f.path === zoom.value));
 const info = computed(() => activity(shown.value, props.turn));
@@ -19,21 +21,21 @@ const totals = computed(() => files.value.some(f => f.added === null || f.remove
 const failure = computed(() => typeof shown.value.error === 'string' ? shown.value.error : (shown.value.error as { message?: string } | undefined)?.message || '');
 const path = (value: string) => relativeDiffPath(value, props.cwd);
 let trigger: HTMLElement | undefined;
-function heldSelection() { const selection = getSelection(); return !!selection && !selection.isCollapsed && !!selection.anchorNode && !!dialog.value?.contains(selection.anchorNode); }
+function heldSelection() { const selection = viewerWindow().getSelection(); return !!selection && !selection.isCollapsed && !!selection.anchorNode && !!dialog.value?.contains(selection.anchorNode); }
 function refresh() { if (!heldSelection()) shown.value = props.item; }
 watch(() => props.item, refresh);
 function toggle(file: string) { const next = new Set(openPaths.value); if (next.has(file)) next.delete(file); else next.add(file); props.view.files = [...next]; }
 async function show(file: string, event: MouseEvent) {
   trigger = event.currentTarget as HTMLElement; zoom.value = file;
-  document.addEventListener('selectionchange', refresh);
+  viewerDocument().addEventListener('selectionchange', refresh);
   await nextTick(); dialog.value?.showModal();
 }
 function close() {
-  dialog.value?.close(); zoom.value = ''; document.removeEventListener('selectionchange', refresh); shown.value = props.item;
+  dialog.value?.close(); zoom.value = ''; viewerDocument().removeEventListener('selectionchange', refresh); shown.value = props.item;
   if (trigger?.isConnected) trigger.focus({ preventScroll: true });
 }
 watch(files, () => { if (zoom.value && !selected.value) close(); });
-onBeforeUnmount(() => { document.removeEventListener('selectionchange', refresh); dialog.value?.close(); });
+onBeforeUnmount(() => { viewerDocument().removeEventListener('selectionchange', refresh); dialog.value?.close(); });
 </script>
 <template>
   <section class="activity file-change" :class="[info.state, { declined: shown.status === 'declined' }]" data-kind="fileChange" aria-label="文件修改记录">

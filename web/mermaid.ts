@@ -1,3 +1,4 @@
+import { viewerDocument, viewerWindow, viewerRoot, isElement, isHTMLElement } from './environment.ts';
 import type { InjectionKey } from 'vue';
 import type { Mermaid, MermaidConfig } from 'mermaid';
 import type { MermaidBlock } from './render.ts';
@@ -101,10 +102,10 @@ export function createMermaidRenderer(root: () => HTMLElement | undefined) {
         let value: Cached;
         try {
           checkMermaidSource(job.source);
-          const mermaid = await loadMermaid(); await document.fonts.ready;
+          const mermaid = await loadMermaid(); await viewerDocument().fonts.ready;
           if (job.signal.aborted || disposed) continue;
-          scratch = document.createElement('div'); scratch.className = 'mermaid-scratch';
-          scratch.setAttribute('aria-hidden', 'true'); scratch.inert = true; document.body.append(scratch);
+          scratch = viewerDocument().createElement('div'); scratch.className = 'mermaid-scratch';
+          scratch.setAttribute('aria-hidden', 'true'); scratch.inert = true; viewerRoot().append(scratch);
           const { svg } = await mermaid.render(`viewer-mermaid-${++sequence}`, job.source, scratch);
           const result = standaloneSvg(svg);
           value = { result, bytes: new Blob([job.source, result.svg]).size };
@@ -121,21 +122,21 @@ export function createMermaidRenderer(root: () => HTMLElement | undefined) {
     queue.push({ source, signal, done }); void drain();
   }
   function button(label: string, action: () => void) {
-    const el = document.createElement('button'); el.type = 'button'; el.className = 'quiet'; el.textContent = label; el.onclick = action; return el;
+    const el = viewerDocument().createElement('button'); el.type = 'button'; el.className = 'quiet'; el.textContent = label; el.onclick = action; return el;
   }
   function download(url: string) {
-    const link = document.createElement('a'); link.href = url; link.download = 'diagram.svg'; link.click();
+    const link = viewerDocument().createElement('a'); link.href = url; link.download = 'diagram.svg'; link.click();
   }
   function enlarge(view: DiagramView, url: string, result: Result) {
     dialog?.close(); dialog?.remove(); activeView = view;
-    const opener = document.activeElement;
-    const modal = document.createElement('dialog'); dialog = modal; modal.className = 'mermaid-dialog';
+    const opener = viewerDocument().activeElement;
+    const modal = viewerDocument().createElement('dialog'); dialog = modal; modal.className = 'mermaid-dialog';
     modal.setAttribute('aria-label', 'Mermaid 图表放大查看'); modal.dataset.copyIgnore = '';
-    const toolbar = document.createElement('div'); toolbar.className = 'mermaid-toolbar';
-    const viewport = document.createElement('div'); viewport.className = 'mermaid-viewport'; viewport.tabIndex = 0; viewport.setAttribute('aria-label', '图表，可拖动或使用方向键滚动');
-    const img = document.createElement('img'); img.src = url; img.alt = 'Mermaid 图表'; img.draggable = false;
+    const toolbar = viewerDocument().createElement('div'); toolbar.className = 'mermaid-toolbar';
+    const viewport = viewerDocument().createElement('div'); viewport.className = 'mermaid-viewport'; viewport.tabIndex = 0; viewport.setAttribute('aria-label', '图表，可拖动或使用方向键滚动');
+    const img = viewerDocument().createElement('img'); img.src = url; img.alt = 'Mermaid 图表'; img.draggable = false;
     viewport.append(img);
-    const scaleLabel = document.createElement('output'); scaleLabel.setAttribute('aria-label', '缩放比例');
+    const scaleLabel = viewerDocument().createElement('output'); scaleLabel.setAttribute('aria-label', '缩放比例');
     let scale = 1;
     const fitScale = () => Math.min(1, (viewport.clientWidth - 32) / result.width, (viewport.clientHeight - 32) / result.height);
     function zoom(next: number) {
@@ -156,17 +157,17 @@ export function createMermaidRenderer(root: () => HTMLElement | undefined) {
     modal.onclose = () => {
       modal.remove();
       if (dialog === modal) { dialog = undefined; activeView = undefined; }
-      if (!disposed && opener instanceof HTMLElement && opener.isConnected) opener.focus({ preventScroll: true });
+      if (!disposed && isHTMLElement(opener) && opener.isConnected) opener.focus({ preventScroll: true });
     };
-    modal.append(toolbar, viewport); document.body.append(modal); modal.showModal(); fit();
+    modal.append(toolbar, viewport); viewerRoot().append(modal); modal.showModal(); fit();
   }
 
   function create(block: MermaidBlock, pre: HTMLElement, copy: (text: string) => void, changed: () => void): DiagramView {
-    const element = document.createElement('div'); element.className = 'mermaid-block'; element.dataset.mermaid = block.id;
-    const toolbar = document.createElement('div'); toolbar.className = 'mermaid-toolbar'; toolbar.dataset.copyIgnore = '';
-    const label = document.createElement('span'); label.textContent = 'Mermaid';
-    const image = document.createElement('img'); image.className = 'mermaid-image'; image.alt = 'Mermaid 图表（可切换源码或放大查看）'; image.hidden = true; image.draggable = false;
-    const status = document.createElement('p'); status.className = 'mermaid-status'; status.dataset.copyIgnore = ''; status.setAttribute('role', 'status');
+    const element = viewerDocument().createElement('div'); element.className = 'mermaid-block'; element.dataset.mermaid = block.id;
+    const toolbar = viewerDocument().createElement('div'); toolbar.className = 'mermaid-toolbar'; toolbar.dataset.copyIgnore = '';
+    const label = viewerDocument().createElement('span'); label.textContent = 'Mermaid';
+    const image = viewerDocument().createElement('img'); image.className = 'mermaid-image'; image.alt = 'Mermaid 图表（可切换源码或放大查看）'; image.hidden = true; image.draggable = false;
+    const status = viewerDocument().createElement('p'); status.className = 'mermaid-status'; status.dataset.copyIgnore = ''; status.setAttribute('role', 'status');
     let ready = false, near = false, mode = false, dead = false, url = '', result: Result | undefined, failed = false;
     let request: AbortController | undefined, pending: Cached | undefined;
     const toggle = button('源码', () => { mode = !mode; display(); requestRender(); }); toggle.setAttribute('aria-pressed', 'false');
@@ -187,11 +188,11 @@ export function createMermaidRenderer(root: () => HTMLElement | undefined) {
       changed();
     }
     function hasSelection() {
-      const selection = getSelection(); return !!selection && !selection.isCollapsed && !!selection.anchorNode && !!root()?.contains(selection.anchorNode);
+      const selection = viewerWindow().getSelection(); return !!selection && !selection.isCollapsed && !!selection.anchorNode && !!root()?.contains(selection.anchorNode);
     }
     function commit() {
       if (!pending || dead || hasSelection()) return;
-      document.removeEventListener('selectionchange', commit);
+      viewerDocument().removeEventListener('selectionchange', commit);
       const value = pending; pending = undefined; request = undefined;
       if (value.result) {
         result = value.result; url = URL.createObjectURL(new Blob([result.svg], { type: 'image/svg+xml' }));
@@ -209,7 +210,7 @@ export function createMermaidRenderer(root: () => HTMLElement | undefined) {
     function requestRender() {
       if (!ready || !near || mode || request || pending || result || failed || dead) return;
       request = new AbortController();
-      enqueue(block.source, request.signal, value => { pending = value; commit(); if (pending) document.addEventListener('selectionchange', commit); });
+      enqueue(block.source, request.signal, value => { pending = value; commit(); if (pending) viewerDocument().addEventListener('selectionchange', commit); });
       display();
     }
     const view: DiagramView = { element, source: block.source,
@@ -217,7 +218,7 @@ export function createMermaidRenderer(root: () => HTMLElement | undefined) {
       dispose() {
         if (dead) return;
         dead = true; request?.abort(); queue = queue.filter(job => !job.signal.aborted);
-        observer?.unobserve(element); visible.delete(element); document.removeEventListener('selectionchange', commit);
+        observer?.unobserve(element); visible.delete(element); viewerDocument().removeEventListener('selectionchange', commit);
         if (activeView === view) { dialog?.close(); dialog?.remove(); dialog = undefined; activeView = undefined; }
         if (url) URL.revokeObjectURL(url); image.onload = null; image.onerror = null; pending = undefined; views.delete(view);
       },

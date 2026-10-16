@@ -92,7 +92,7 @@ export function itemView(reading: Reading, key: string): ItemView {
   return value;
 }
 export function messageSource(item: Item): string {
-  return item.type === 'userMessage' ? (item.content || []).map(p => p.type === 'text' ? String(p.text || '') : p.type === 'skill' ? '$' + String(p.name) : '[图片附件]').join('\n') : item.text || '';
+  return item.type === 'userMessage' ? (item.content || []).map((p,index) => p.type === 'text' ? (index && String(p.text||'').startsWith('Vault Assistant 环境：') ? '' : index && String(p.text||'').startsWith('Vault 阅读上下文快照') ? '[附加阅读材料]' : String(p.text || '')) : p.type === 'skill' ? '$' + String(p.name) : '[图片附件]').join('\n') : item.text || '';
 }
 export function searchableText(item: Item, turn: Turn): string {
   if (item.type === 'fileChange') return (item.changes || []).map(f => [f.path, f.kind.type === 'update' ? f.kind.move_path : '', f.diff].filter(Boolean).join('\n')).join('\n');

@@ -1,7 +1,9 @@
 import { createInterface } from 'node:readline';
 import { readFileSync, writeFileSync } from 'node:fs';
 import type { Obj, Thread, Turn } from '../shared/protocol.ts';
+import { referenceTools } from '../server/references-mcp.ts';
 export const answer = '你好 **world**，公式 $\\frac{1}{2}$。\n\n[OpenAI](https://openai.com)\n\n```ts\nconst x = 1;\n\n\nconsole.log(x);\n```\n\n| A | B |\n| - | - |\n| 1 | 2 |\n\n目前最值得正式追查的是：**错误的成功判定是否进入论文统计、交易表是否被当作真实数据、人工提供的关键推导是否充分披露。**现阶段没有结论。\n\n[调用方](sample.py:2)';
+const archived=new Set<string>();
 const threads = new Map<string, Thread>(); let next = 0;
 const ephemeral = new Set<string>();
 const stateFile=process.env.VIEWER_FAKE_STATE;
@@ -30,6 +32,10 @@ createInterface({ input: process.stdin }).on('line', line => {
   if (m.method === 'initialize') return reply({});
   if (m.method === 'account/read') return reply({ account: { type:'chatgpt', planType:'pro' } });
   if (m.method === 'config/read') return reply({ config: { model:'mock', model_provider:'openai', approvals_reviewer:'auto_review' } });
+  if (m.method === 'mcpServerStatus/list')return reply({data:process.env.VIEWER_FAKE_NO_REFERENCES?[]:[{name:'viewer_references',tools:Object.fromEntries(referenceTools.map(t=>[t.name,t]))}],nextCursor:null});
+  if ((m.method==='mcpServer/tool/call' && p.server==='viewer_references') || m.method==='mock/references') {
+    void fetch(process.env.VIEWER_REFERENCES_URL!,{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${process.env.VIEWER_REFERENCES_TOKEN}`},body:JSON.stringify({name:p.tool || p.name,arguments:p.arguments,_meta:p.noIdentity?{}:{threadId:p.threadId}})}).then(async r=>{const value=await r.json();if(m.method==='mock/references'){if(r.ok)reply(value);else send({id:m.id,error:{message:value.error}});}else reply({isError:!r.ok,content:[{type:'text',text:JSON.stringify(value)}]});});return;
+  }
   if (m.method === 'account/rateLimits/read') return reply({ rateLimits: { limitId: 'codex', secondary: { usedPercent: 27, windowDurationMins: 10080, resetsAt: 1900000000 } }, rateLimitResetCredits: { availableCount: 2, credits: [] } });
   if(m.method==='model/list')return reply({data:['mock','mock-fast'].map(model=>({model,displayName:model,supportsExperimentalContext:model==='mock',defaultReasoningEffort:'medium',supportedReasoningEfforts:[{reasoningEffort:'low'},{reasoningEffort:'medium'},{reasoningEffort:'high'}]})),nextCursor:null});
   if(m.method==='collaborationMode/list')return reply({data:[{mode:'default',name:'Default'},{mode:'plan',name:'Plan'}]});
@@ -41,8 +47,9 @@ createInterface({ input: process.stdin }).on('line', line => {
       while (parent && !seen.has(parent)) { if (parent === p.ancestorThreadId) return true; seen.add(parent); parent = threads.get(parent)?.parentThreadId; }
       return false;
     };
-    return reply({ data: [...threads.values()].filter(t => (!p.ancestorThreadId || descendant(t)) && (!p.sourceKinds || p.sourceKinds.includes(t.parentThreadId ? 'subAgentThreadSpawn' : 'appServer'))), nextCursor: null });
+    return reply({ data: [...threads.values()].filter(t => !archived.has(t.id) && (!p.ancestorThreadId || descendant(t)) && (!p.sourceKinds || p.sourceKinds.includes(t.parentThreadId ? 'subAgentThreadSpawn' : 'appServer'))), nextCursor: null });
   }
+  if(m.method==='thread/archive'){archived.add(p.threadId);notice('thread/archived',{threadId:p.threadId});return reply({});}
   if (m.method === 'thread/loaded/list') return reply({ data: [...threads.keys()], nextCursor: null });
   if (m.method === 'thread/start') {
     const t: Thread = { id: 'thread-' + ++next, cwd: p.cwd, name:null, preview:'', status: { type: 'idle' }, turns: [],settings:{model:p.model||'mock',effort:'medium',mode:'default'} };

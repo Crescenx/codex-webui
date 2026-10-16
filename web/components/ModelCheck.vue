@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { viewerDocument, viewerWindow, viewerRoot } from '../environment.ts';
+
 import { computed, ref, onBeforeUnmount } from 'vue';
 import { useViewer } from '../store.ts';
 import { createClient } from '../api.ts';
@@ -28,7 +30,7 @@ const summary = computed(() => {
 });
 function download() {
   const url = URL.createObjectURL(new Blob([JSON.stringify({ threadId: current.value?.id, scope: '真实 WebSocket 响应正文与请求上下文按 response ID 关联；最多 100 条元数据，不含完整请求正文', events: events.value, independentHttpProbe: result.value }, null, 2)], { type: 'application/json' }));
-  const a = document.createElement('a'); a.href = url; a.download = 'model-evidence.json'; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+  const a = viewerDocument().createElement('a'); a.href = url; a.download = 'model-evidence.json'; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 </script>
 <template>

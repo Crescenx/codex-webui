@@ -1,14 +1,21 @@
 <script setup lang="ts">
+import { viewerDocument, viewerWindow, viewerRoot } from '../environment.ts';
+
 import { computed, nextTick, ref, watch } from 'vue';
 import type { Settings, Skill } from '../../shared/protocol.ts';
 import { useViewer } from '../store.ts';
 import GoalPanel from './GoalPanel.vue';
+import ReferenceDialog from './ReferenceDialog.vue';
+import ReferenceCard from './ReferenceCard.vue';
 import { matchingSkills, skillTrigger } from '../skills.ts';
 const emit = defineEmits<{ skills: [query?: string] }>();
 const store = useViewer(), { current, draft, active, approvals, canSend } = store;
 const files = ref<HTMLInputElement>(), form = ref<HTMLFormElement>(), dragging = ref(false);
 const goalPanel = ref<InstanceType<typeof GoalPanel>>();
+const referenceDialog = ref<InstanceType<typeof ReferenceDialog>>();
+const grantedSessions=computed(()=>current.value?.references?.filter(r=>r.kind==='session' && r.active && !r.revoked) || []);
 const prompt = ref<HTMLTextAreaElement>(), caret = ref(0), suggest = ref(false), composing = ref(false), candidate = ref(0);
+defineExpose({ focus: () => { const el=prompt.value; if(el){el.focus();el.setSelectionRange(el.value.length,el.value.length);} } });
 const trigger = computed(() => skillTrigger(draft.value?.text || '', caret.value));
 const candidates = computed(() => trigger.value && !loading.value ? matchingSkills(catalog.value?.skills.filter(s => s.enabled) || [], trigger.value.query).slice(0, 8) : []);
 const suggestionsOpen = computed(() => suggest.value && !composing.value && !!trigger.value && candidates.value.length > 0);
@@ -23,7 +30,7 @@ async function chooseSkill(skill: Skill) {
   await nextTick(); prompt.value?.focus(); prompt.value?.setSelectionRange(token.start, token.start); caret.value = token.start;
 }
 watch(() => current.value?.id, () => { suggest.value = false; candidate.value = 0; });
-watch(candidate, () => void nextTick(() => document.getElementById('skill-candidate-' + candidate.value)?.scrollIntoView({ block: 'nearest' })));
+watch(candidate, () => void nextTick(() => viewerDocument().getElementById('skill-candidate-' + candidate.value)?.scrollIntoView({ block: 'nearest' })));
 const loading = computed(() => !current.value || store.state.hydrating || draft.value?.loading);
 const catalog = computed(() => draft.value?.catalog);
 const desired = computed(() => draft.value?.desired || current.value?.settings);
@@ -93,18 +100,23 @@ function keydown(event: KeyboardEvent) {
       <div v-for="q in draft.queued" :key="q.id" class="queued-input">
         <span class="subtle">{{ current?.turns?.some(t => t.id === q.turnId && t.status === 'inProgress') ? '已排队，等待 Codex 接收' : '接收尚未确认，内容保留在此' }}</span>
         <pre>{{ q.text }}</pre><span v-for="s in q.skills" :key="s.path">${{ s.name }} </span>
+        <ReferenceCard v-for="r in q.references || []" :key="r.id" :reference="r" />
         <a v-for="a in q.attachments" :key="a.id" :href="'/api/attachments/' + a.id" target="_blank" rel="noopener">{{ a.name }} </a>
         <button v-if="!current?.turns?.some(t => t.id === q.turnId && t.status === 'inProgress')" type="button" class="quiet" title="只移除此提示，不会撤回或重新发送消息" @click="store.dismissQueued(q.id)">清除此提示</button>
       </div>
     </details>
     <div id="attachments"><span v-for="a in draft?.attachments || []" :key="a.id" class="attachment"><img v-if="a.mime.startsWith('image/')" :src="'/api/attachments/' + a.id" :alt="a.name">{{ a.name }}<button type="button" class="quiet" @click="store.removeAttachment(a.id)">×</button></span></div>
+    <div class="draft-references"><ReferenceCard v-for="r in draft?.references || []" :key="r.id" :reference="r" removable @remove="store.removeReference(r.id)" /></div>
+    <details v-if="grantedSessions.length" class="session-grants"><summary>已授权 Session · {{ grantedSessions.length }}</summary><div v-for="r in grantedSessions" :key="r.id"><span>{{ r.title }} · 持续只读 </span><button type="button" class="quiet" @click="store.revokeReference(r.id).catch(store.report)">撤销后续读取</button></div><p class="subtle">撤销不会删除 AI 已经读取的内容。</p></details>
     <div class="prompt-area"><div v-if="suggestionsOpen" id="skill-suggestions" class="skill-suggestions"><div id="skill-candidates" role="listbox" aria-label="匹配的技能"><div v-for="(s, i) in candidates" :id="'skill-candidate-' + i" :key="s.path" role="option" :aria-selected="candidate === i" :class="{ highlighted: candidate === i }" @pointerdown.prevent="chooseSkill(s)"><strong>{{ s.name }} <small v-if="draft?.skills.some(v => v.path === s.path)">已选</small></strong><span>{{ s.description }}</span><small v-if="candidates.filter(other => other.name === s.name).length > 1">{{ s.path }}</small></div></div><button type="button" class="quiet" @pointerdown.prevent @click="suggest = false; emit('skills', trigger?.query)">在技能窗口中搜索全部匹配 →</button></div>
     <label class="sr-only" for="prompt">消息</label><textarea id="prompt" ref="prompt" :value="draft?.text || ''" rows="3" placeholder="描述任务，输入 $ 查找技能，或粘贴截图与文件…" :aria-controls="suggestionsOpen ? 'skill-candidates' : undefined" :aria-activedescendant="suggestionsOpen ? 'skill-candidate-' + candidate : undefined" aria-autocomplete="list" @input="edit" @click="trackCaret" @keyup.left="trackCaret" @keyup.right="trackCaret" @compositionstart="composing = true" @compositionend="composing = false; trackCaret()" @blur="suggest = false" @keydown="keydown" @paste="paste"></textarea></div>
     <div class="composer-actions"><button id="attach" type="button" class="quiet" title="添加附件" @click="files?.click()">＋ 附件</button><input id="files" ref="files" type="file" multiple hidden @change="upload">
+      <button v-if="catalog?.capabilities?.references" type="button" class="quiet" :disabled="!catalog.capabilities.references.session || loading" :title="catalog.capabilities.references.reason || '让 AI 按需读取另一个会话'" @click="referenceDialog?.showSession()">＋ Session</button>
       <span id="hint" :class="{ running: active && !approvals.length }">{{ draft?.stopping ? '正在停止…' : draft?.sending ? '正在提交…' : draft?.uploading ? '正在上传…' : active ? approvals.length ? '等待审批 / 回答；可追加消息或打断' : 'Enter 排队追加 · Shift+Enter 换行' : 'Enter 发送 · Shift+Enter 换行' }}</span>
       <button id="stop" type="button" class="quiet" :hidden="!active && current?.goal?.status !== 'active'" :disabled="draft?.sending || draft?.stopping || draft?.goalSaving" :title="current?.goal?.status === 'active' ? '暂停 Goal 并停止当前轮次' : '停止当前轮次'" @click="store.interrupt()">■ 停止</button>
-      <button v-if="active" id="send-interrupt" type="button" class="quiet" :disabled="!canSend || store.contextBlocked.value || (!draft?.queued.length && !draft?.text.trim() && !draft?.attachments.length)" title="停止当前任务，将全部待接收消息和输入框内容按顺序一起发送" @click="store.send('interrupt')">{{ draft?.queued.length ? '打断并发送全部' : '打断并发送' }}</button>
+      <button v-if="active" id="send-interrupt" type="button" class="quiet" :disabled="!canSend || store.contextBlocked.value || (!draft?.queued.length && !draft?.text.trim() && !draft?.attachments.length && !draft?.references.length)" title="停止当前任务，将全部待接收消息和输入框内容按顺序一起发送" @click="store.send('interrupt')">{{ draft?.queued.length ? '打断并发送全部' : '打断并发送' }}</button>
       <button id="send" type="submit" :disabled="!canSend" :title="sendReason">{{ active ? '排队追加 ↑' : draft?.queued.length ? '发送全部 ↑' : '发送 ↑' }}</button>
     </div>
   </form>
+  <ReferenceDialog ref="referenceDialog" />
 </template>

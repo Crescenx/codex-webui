@@ -1,0 +1,71 @@
+{
+  "verifiedAt": "2026-09-19T00:54:21.289Z",
+  "ids": [
+    {
+      "threadId": "01a0b728-1e9f-76f3-adc7-b604bd31c1f6",
+      "turnId": "01a0b728-1eef-70e1-9b1c-a9fc739457de"
+    },
+    {
+      "threadId": "01a0b728-1e9f-76f3-adc7-b623b4dda1a9",
+      "turnId": "01a0b728-1f01-74a1-8267-a8399b3048c7"
+    }
+  ],
+  "captured": [
+    {
+      "method": "viewer/modelResponse",
+      "params": {
+        "threadId": "01a0b728-1e9f-76f3-adc7-b623b4dda1a9",
+        "turnId": "01a0b728-1f01-74a1-8267-a8399b3048c7",
+        "requestedModel": "gpt-6-astra",
+        "event": "response.created",
+        "model": "gpt-6-astra",
+        "status": "in_progress",
+        "recordedAt": "2026-09-19T00:54:18.634876Z",
+        "responseId": "resp_0e5419f664f621c7016aaddd3b997887d088d24cc2659cabf0",
+        "transport": "WebSocket"
+      }
+    },
+    {
+      "method": "viewer/modelResponse",
+      "params": {
+        "threadId": "01a0b728-1e9f-76f3-adc7-b623b4dda1a9",
+        "turnId": "01a0b728-1f01-74a1-8267-a8399b3048c7",
+        "requestedModel": "gpt-6-astra",
+        "event": "response.completed",
+        "model": "gpt-6-astra",
+        "status": "completed",
+        "recordedAt": "2026-09-19T00:54:20.069343Z",
+        "responseId": "resp_0e5419f664f621c7016aaddd3b997887d088d24cc2659cabf0",
+        "transport": "WebSocket"
+      }
+    },
+    {
+      "method": "viewer/modelResponse",
+      "params": {
+        "threadId": "01a0b728-1e9f-76f3-adc7-b604bd31c1f6",
+        "turnId": "01a0b728-1eef-70e1-9b1c-a9fc739457de",
+        "requestedModel": "gpt-6-astra",
+        "event": "response.created",
+        "model": "gpt-6-astra",
+        "status": "in_progress",
+        "recordedAt": "2026-09-19T00:54:18.671828Z",
+        "responseId": "resp_0405bfc924fc1aeb016aaddd3b8c8887d0af4af912035eb18c",
+        "transport": "WebSocket"
+      }
+    },
+    {
+      "method": "viewer/modelResponse",
+      "params": {
+        "threadId": "01a0b728-1e9f-76f3-adc7-b604bd31c1f6",
+        "turnId": "01a0b728-1eef-70e1-9b1c-a9fc739457de",
+        "requestedModel": "gpt-6-astra",
+        "event": "response.completed",
+        "model": "gpt-6-astra",
+        "status": "completed",
+        "recordedAt": "2026-09-19T00:54:21.277233Z",
+        "responseId": "resp_0405bfc924fc1aeb016aaddd3b8c8887d0af4af912035eb18c",
+        "transport": "WebSocket"
+      }
+    }
+  ]
+}

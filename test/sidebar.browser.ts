@@ -45,6 +45,29 @@ async function fixture(page: Page, projectFor: (i: number) => number, count: num
 }
 
 
+test('Windows directory casing shares one project group while Linux casing remains distinct', async ({page}) => {
+  const h=await fixture(page,i=>i,4);
+  try {
+    const projects=['/mnt/d/Documents/obsidian/knowbase','/mnt/d/documents/obsidian/knowbase','/home/user/Notes','/home/user/notes'];
+    await page.route('**/api/threads**',async route=>{
+      const response=await route.fetch(),body=await response.json();
+      for(const thread of body.data || (body.thread?[body.thread]:[])) {
+        const index=h.records.findIndex(t=>t.id===thread.id);
+        if(index>=0)thread.projectRoot=projects[index];
+      }
+      await route.fulfill({response,json:body});
+    });
+    await page.reload();
+    await expect(page.locator('.project')).toHaveCount(3);
+    await expect(page.locator('.project-name').filter({hasText:'knowbase'})).toHaveCount(1);
+    const vault=page.locator('.project').filter({has:page.locator('.project-name',{hasText:'knowbase'})});
+    await expect(vault.locator('.thread')).toHaveCount(2);
+    await vault.locator('.thread').first().click();await expect(page.locator('#send')).toBeEnabled();
+    await expect(vault.locator('.thread')).toHaveCount(2);
+    await expect(page.locator('.project')).toHaveCount(3);
+  } finally {await h.stop();}
+});
+
 test('single project history is incremental, preserves navigation and retries failures', async ({ page, context }, info) => {
   const h = await fixture(page, i => i < 50 || i >= 100 && i < 125 ? 0 : i < 100 ? 1 : 2, 200);
   try {

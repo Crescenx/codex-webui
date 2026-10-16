@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { viewerDocument, viewerWindow, viewerRoot, isElement, isHTMLElement } from '../environment.ts';
+
 import { computed, ref } from 'vue';
 import { diffLanguage, splitDiffRows } from '../diff.ts';
 import type { DiffLine, FileDiff } from '../diff.ts';
@@ -21,11 +23,11 @@ function scrollPane(event: Event) {
   for (const pane of viewport.value?.querySelectorAll<HTMLElement>('.diff-pane') || []) if (pane !== source && pane.scrollTop !== source.scrollTop) pane.scrollTop = source.scrollTop;
 }
 function copySelection(event: ClipboardEvent) {
-  const selection = getSelection();
+  const selection = viewerWindow().getSelection();
   if (!selection?.rangeCount || selection.isCollapsed || !event.clipboardData || !viewport.value) return;
   const range = selection.getRangeAt(0);
   if (!viewport.value.contains(range.startContainer) || !viewport.value.contains(range.endContainer)) return;
-  const element = range.startContainer instanceof Element ? range.startContainer : range.startContainer.parentElement;
+  const element = isElement(range.startContainer) ? range.startContainer : range.startContainer.parentElement;
   const pane = element?.closest<HTMLElement>('.diff-pane');
   const column = columns.value.find(c => c.side === pane?.dataset.side);
   if (!pane || !column) {
@@ -35,7 +37,7 @@ function copySelection(event: ClipboardEvent) {
   const pieces: { text: string; ending: string }[] = [];
   for (const code of pane.querySelectorAll<HTMLElement>('.diff-code')) {
     if (!range.intersectsNode(code)) continue;
-    const part = document.createRange(); part.selectNodeContents(code);
+    const part = viewerDocument().createRange(); part.selectNodeContents(code);
     if (range.compareBoundaryPoints(Range.START_TO_START, part) > 0) part.setStart(range.startContainer, range.startOffset);
     if (range.compareBoundaryPoints(Range.END_TO_END, part) < 0) part.setEnd(range.endContainer, range.endOffset);
     const line = column.rows[Number(code.dataset.row)]?.line;

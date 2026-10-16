@@ -1,3 +1,4 @@
+import { viewerDocument, viewerWindow, viewerRoot, isElement, isHTMLElement, materialImage, materialVault, materialVaultRoot } from './environment.ts';
 import { unified, type Processor } from 'unified';
 import remarkParse from 'remark-parse';
 import remarkGfm from 'remark-gfm';
@@ -90,6 +91,12 @@ export function renderMarkdown(source: string, threadId?: string, cache = new Ma
             let target = '';
             // HAST URLs are URI-encoded; file APIs and the clipboard take native paths.
             try { target = decodeURIComponent(href); } catch { /* incomplete URL */ }
+            if(href.startsWith('obsidian://open?') && materialVault()){
+              try{const uri=new URL(href);target=uri.searchParams.get('vault')===materialVault()?uri.searchParams.get('file')||'':'';
+                if(target.startsWith('/') || target.includes('\\') || target.split('/').some(p=>p==='..'||p==='.'))target='';
+                if(target && materialVaultRoot())target=materialVaultRoot()+'/'+target;
+              }catch{target='';}
+            }
             if(target && !/[\x00-\x1f\x7f]/.test(target) && !/^[a-z][a-z\d+.-]*:/i.test(target.replace(/:\d+(?::\d+)?$/,'')) && !target.startsWith('//')) {
               node.properties.dataFile=target; node.properties.tabIndex=0;node.properties.role='button';
               node.children.push({type:'element',tagName:'small',properties:{dataCopyIgnore:'',className:['link-target']},children:[{type:'text',value:' · '+target.split('/').at(-1)}]});
@@ -137,26 +144,27 @@ export function renderMarkdown(source: string, threadId?: string, cache = new Ma
 
 const maps = new WeakMap<HTMLElement, Map<string,string>>();
 export function renderInto(el: HTMLElement, rendered: Rendered, preserved = new Map<string, HTMLElement>()) {
-  const focused = document.activeElement;
-  const template = document.createElement('template'); template.innerHTML = rendered.html;
+  const focused = el.ownerDocument.activeElement;
+  const template = el.ownerDocument.createElement('template'); template.innerHTML = rendered.html;
   // Browsers reuse mounted images with the same URL even with no-store; files can be overwritten.
   for (const img of template.content.querySelectorAll<HTMLImageElement>('img[src^="/api/files/image?"]')) {
-    img.setAttribute('src', img.getAttribute('src') + '&v=' + crypto.randomUUID());
+    const target=new URL(img.getAttribute('src')!, 'http://localhost').searchParams.get('target');
+    img.setAttribute('src', target && materialImage(target) || img.getAttribute('src') + '&v=' + crypto.randomUUID());
   }
   for (const slot of template.content.querySelectorAll<HTMLElement>('[data-mermaid]')) {
     const existing = preserved.get(slot.dataset.mermaid!);
     if (existing) slot.replaceWith(existing);
   }
   el.replaceChildren(template.content); maps.set(el, rendered.atoms);
-  if (focused instanceof HTMLElement && el.contains(focused) && focused !== document.activeElement) focused.focus({ preventScroll: true });
+  if (isHTMLElement(focused) && el.contains(focused) && focused !== el.ownerDocument.activeElement) focused.focus({ preventScroll: true });
   for (const img of el.querySelectorAll<HTMLImageElement>('img:not(.mermaid-image)')) img.addEventListener('error', () => {
-    const fallback = document.createElement('span'); fallback.dataset.atom = img.dataset.atom;
+    const fallback = el.ownerDocument.createElement('span'); fallback.dataset.atom = img.dataset.atom;
     fallback.textContent = `图片无法读取：${img.alt || img.title}`; fallback.title = img.title;
     img.replaceWith(fallback);
   }, { once: true });
 }
 function overlaps(range: Range, node: Node | globalThis.Node): boolean {
-  const r = document.createRange(); r.selectNodeContents(node as globalThis.Node);
+  const r = (node as globalThis.Node).ownerDocument!.createRange(); r.selectNodeContents(node as globalThis.Node);
   const a = range.cloneRange(); a.collapse(true);
   const b = range.cloneRange(); b.collapse(false);
   const c = r.cloneRange(); c.collapse(true);
@@ -165,7 +173,7 @@ function overlaps(range: Range, node: Node | globalThis.Node): boolean {
 }
 
 export function selectedSource(range: Range, scope: HTMLElement): string {
-  const start = range.startContainer instanceof Element ? range.startContainer : range.startContainer.parentElement;
+  const start = isElement(range.startContainer) ? range.startContainer : range.startContainer.parentElement;
   const selectedCode = start?.closest('pre code');
   // Highlight spans are presentation only: a selection inside code is literal text.
   if (selectedCode && selectedCode.contains(range.endContainer)) return range.toString();
@@ -176,14 +184,14 @@ export function selectedSource(range: Range, scope: HTMLElement): string {
   const append = (value: string) => { if (!value) return; if (output.length && separator && !output.at(-1)!.endsWith(separator)) output.push(separator); separator = ''; output.push(value); };
   const walk = (node: globalThis.Node) => {
     if (!overlaps(range, node)) return;
-    if (node instanceof HTMLElement && node.closest('[data-copy-ignore]')) return;
-    if (node instanceof HTMLElement && node.dataset.atom) {
+    if (isHTMLElement(node) && node.closest('[data-copy-ignore]')) return;
+    if (isHTMLElement(node) && node.dataset.atom) {
       const owner = node.closest<HTMLElement>('.markdown');
       const raw = owner ? maps.get(owner)?.get(node.dataset.atom) : undefined;
       if (raw !== undefined) {
         const code = node.matches('pre code') ? node : node.querySelector('pre code');
         if (code && overlaps(range, code)) {
-          const part = document.createRange(); part.selectNodeContents(code);
+          const part = viewerDocument().createRange(); part.selectNodeContents(code);
           const startsInside = range.compareBoundaryPoints(Range.START_TO_START, part) > 0;
           const endsInside = range.compareBoundaryPoints(Range.END_TO_END, part) < 0;
           if (startsInside || endsInside) {
@@ -200,11 +208,11 @@ export function selectedSource(range: Range, scope: HTMLElement): string {
       const end = range.endContainer === node ? range.endOffset : node.textContent!.length;
       append(node.textContent!.slice(begin,end)); return;
     }
-    if (node instanceof HTMLElement && block.has(node.tagName)) boundary(node.tagName === 'ARTICLE' ? '\n\n' : '\n');
-    if (node instanceof HTMLElement && node.tagName === 'BR') boundary();
+    if (isHTMLElement(node) && block.has(node.tagName)) boundary(node.tagName === 'ARTICLE' ? '\n\n' : '\n');
+    if (isHTMLElement(node) && node.tagName === 'BR') boundary();
     node.childNodes.forEach(walk);
-    if (node instanceof HTMLElement && block.has(node.tagName)) boundary(node.tagName === 'ARTICLE' ? '\n\n' : '\n');
-    if (node instanceof HTMLElement && ['TD','TH'].includes(node.tagName)) boundary('\t');
+    if (isHTMLElement(node) && block.has(node.tagName)) boundary(node.tagName === 'ARTICLE' ? '\n\n' : '\n');
+    if (isHTMLElement(node) && ['TD','TH'].includes(node.tagName)) boundary('\t');
   };
   scope.childNodes.forEach(walk);
   return output.join('');
@@ -213,8 +221,8 @@ export function selectedSource(range: Range, scope: HTMLElement): string {
 export function installCopy(scope: HTMLElement) {
   const copy = (event: ClipboardEvent) => {
     const target = event.target;
-    if (target instanceof HTMLElement && target.closest('textarea,input,[contenteditable="true"]')) return;
-    const selection = window.getSelection();
+    if (isHTMLElement(target) && target.closest('textarea,input,[contenteditable="true"]')) return;
+    const selection = viewerWindow().getSelection();
     if (!selection?.rangeCount || selection.isCollapsed || !event.clipboardData) return;
     const range = selection.getRangeAt(0);
     if (!scope.contains(range.startContainer) || !scope.contains(range.endContainer)) return;

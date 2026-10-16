@@ -1,0 +1,104 @@
+/* Keep the plugin inside its leaf; all descendants are scoped by the plugin build. */
+.vault-assistant {
+ height:100%;min-height:0;min-width:0;overflow:hidden;padding:0!important;
+ color:var(--text-primary);background:var(--bg-app);font-family:var(--font-interface,var(--font-sans));font-size:14px;line-height:1.5;color-scheme:inherit;
+ /* Obsidian disables text selection in custom views. */
+ -webkit-user-select:text;user-select:text;
+ --bg-app:var(--background-primary);--bg-sidebar:var(--background-secondary);
+ --bg-surface:var(--background-primary-alt);--bg-elevated:var(--background-secondary);
+ --bg-input:var(--background-primary);--bg-hover:var(--background-modifier-hover);--bg-active:var(--background-modifier-active-hover);
+ --text-primary:var(--text-normal);--text-secondary:var(--text-muted);--text-tertiary:var(--text-muted);--text-inverse:var(--text-on-accent);
+ --border-subtle:var(--background-modifier-border);--border-medium:var(--background-modifier-border);--border-strong:var(--background-modifier-border-focus);
+ --accent-primary:var(--text-accent);--accent-hover:var(--interactive-accent-hover);--accent-bg:var(--interactive-accent);
+ --status-running:var(--text-accent);--status-attention:var(--text-warning);--status-failed:var(--text-error);--status-success:var(--text-success);--status-unread:var(--text-accent);
+ --shadow-sm:0 1px 3px #0001;--shadow-md:0 3px 12px #0002;
+}
+.vault-assistant-shell{height:100%;display:flex;flex-direction:column;min-height:0;min-width:0}
+.va-workspace{display:flex;flex:1;min-height:0;min-width:0}
+.va-main{display:flex;flex-direction:column;flex:1;min-width:0;min-height:0;--va-gutter:max(24px,calc((100% - 920px)/2))}
+.va-header{flex:none;min-height:56px;padding:10px 24px;display:flex;gap:14px;align-items:center;border-bottom:1px solid var(--border-subtle);background:var(--bg-app)}
+.va-header strong{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:15px;font-weight:600;line-height:1.5}
+.va-header>.subtle{margin-left:auto;min-width:0;max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
+.va-sidebar-toggle{flex:none;gap:6px}
+.va-reading{position:relative;display:flex;flex-direction:column;flex:1 1 200px;min-height:160px;min-width:0;overflow:hidden}
+.va-reading .conversation{flex:1;min-height:0;padding-inline:var(--va-gutter);overscroll-behavior:contain}
+.va-reading .conversation-reference-actions{flex:none;min-height:34px;padding:2px 18px;gap:4px;border-bottom:1px solid var(--border-subtle)}
+.va-reading .reference-selection-bar{flex:none;flex-wrap:wrap;padding:8px 24px}
+.va-reading .latest{bottom:14px;right:24px;border:1px solid var(--border-medium);background:var(--bg-elevated);box-shadow:var(--shadow-md)}
+.va-reading .conversation:focus:not(:focus-visible){outline:none}
+.va-reading .conversation:focus-visible{outline:1px solid var(--border-strong);outline-offset:-1px}
+.va-interaction{display:flex;flex-direction:column;flex:0 1 auto;min-height:0;max-height:55%;padding-block:8px 14px}
+.va-interaction .approvals{flex:0 1 auto;min-height:0;max-height:24vh;overflow:auto;padding-inline:var(--va-gutter)}
+.va-interaction #composer{flex:0 1 auto;min-height:0;margin:0 var(--va-gutter);border-radius:12px;box-shadow:var(--shadow-sm)}
+.va-interaction .controls{gap:8px 12px;padding:10px 12px 6px}
+.va-interaction .controls label{gap:6px}
+.va-interaction .controls select{max-width:190px;min-width:0}
+.va-interaction .settings-details{padding-inline:14px;margin:2px 0;font-size:12px}
+.va-interaction .prompt-area{display:flex;flex:0 1 auto;min-height:64px}
+.va-interaction #prompt{flex:1;min-width:0;min-height:64px;height:88px;max-height:min(180px,24vh);padding:10px 14px;font-size:15px;line-height:1.6;border-radius:0}
+.va-interaction .composer-actions{gap:6px 8px;padding:6px 10px 10px}
+.va-interaction #hint{flex:1 1 140px;min-width:0;font-size:11px;line-height:1.5}
+.va-interaction #send{padding:7px 16px;min-height:34px;color:var(--text-on-accent)}
+.va-interaction .draft-references,.va-interaction .session-grants{flex:0 1 auto;min-height:0;max-height:160px;overflow:auto}
+.va-interaction .draft-references:empty{display:none}
+.va-empty{margin:auto;max-width:650px;padding:40px;line-height:1.8;font-family:var(--font-serif)}
+.va-error{flex:0 0 auto;max-height:100px;overflow:auto;padding:10px 20px;color:var(--status-failed);background:color-mix(in srgb,var(--status-failed) 8%,var(--bg-app))}
+
+/* Obsidian's fixed input height and shadows must not compete with Viewer padding. */
+.vault-assistant button{height:auto;min-height:30px;display:inline-flex;align-items:center;justify-content:center;gap:5px;padding:5px 10px;line-height:1.4;font-size:13px;box-shadow:none;white-space:normal}
+.vault-assistant input:not([type="checkbox"]):not([type="radio"]),.vault-assistant select{height:32px;padding:5px 9px;line-height:1.4;font-size:13px;box-shadow:none}
+.vault-assistant select{appearance:auto;background-image:none;padding-right:6px}
+.vault-assistant input[type="checkbox"],.vault-assistant input[type="radio"]{flex:none}
+.vault-assistant textarea{box-shadow:none}
+.vault-assistant :is(button,a,input,select,textarea,summary):focus-visible{outline:2px solid var(--accent-primary);outline-offset:2px}
+.vault-assistant #prompt:focus,.vault-assistant #prompt:focus-visible{outline:none;box-shadow:none}
+.vault-assistant .controls button{font-size:12px}
+.vault-assistant .trace-toggle{justify-content:flex-start}
+.vault-assistant .trace-toggle .trace-action{margin-left:auto}
+.vault-assistant .user{background:var(--bg-elevated);box-shadow:none}
+.vault-assistant .message{margin-bottom:26px}
+.vault-assistant .markdown{font-size:16px;line-height:1.9}
+.vault-assistant .markdown pre{line-height:1.65}
+.vault-assistant table{color:var(--text-primary)}
+.vault-assistant .message-header button{min-height:26px;font-size:12px}
+
+.vault-assistant .sidebar{flex:0 0 248px;width:248px;padding:16px 12px 12px}
+.vault-assistant .brand{gap:10px;margin-bottom:18px}
+.vault-assistant .brand span{font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vault-assistant .brand-mark{width:28px;height:28px}
+.vault-assistant #sidebar-collapse{margin-left:auto;flex:none}
+.vault-assistant #new{justify-content:flex-start;min-height:36px;font-size:13px}
+.vault-assistant #search{height:34px}
+.vault-assistant .sidebar .thread{justify-content:flex-start;background:transparent;border:0;border-radius:6px;text-align:left;height:auto;min-height:36px;padding:8px 10px}
+.vault-assistant .sidebar .thread:hover{background:var(--bg-hover)}
+.vault-assistant .sidebar .thread.selected{background:var(--bg-active)}
+.vault-assistant .sidebar .thread strong{font-size:13px;font-weight:500}
+.vault-assistant .thread-actions button{min-height:26px;min-width:26px;padding:3px 6px}
+.vault-assistant .sidebar>.conversation-find,.vault-assistant .va-save{width:100%;justify-content:flex-start}
+.vault-assistant .va-save{margin-top:8px}
+.vault-assistant .sidebar footer{font-size:12px}
+
+.vault-assistant dialog{color-scheme:inherit;border-radius:12px;max-width:calc(100vw - 48px);max-height:calc(100dvh - 64px)}
+.vault-assistant dialog::backdrop{background:#0007;backdrop-filter:blur(3px)}
+.vault-assistant .dialog-header{padding:14px 20px}
+.vault-assistant .dialog-header h2{font-size:17px}
+.vault-assistant .dialog-body{padding:14px 20px}
+.vault-assistant .workspace-dialog .dialog-actions,.vault-assistant .dialog-footer{padding:12px 20px}
+.vault-assistant .skill-filters{flex-wrap:wrap}
+.vault-assistant .skill-filters span{margin-left:0}
+.vault-assistant .skill-suggestions{font-size:13px}
+.vault-assistant .skill-chip{background:color-mix(in srgb,var(--accent-primary) 8%,var(--bg-surface))}
+.vault-assistant .approval{background:color-mix(in srgb,var(--status-attention) 7%,var(--bg-surface));border-color:color-mix(in srgb,var(--status-attention) 45%,var(--border-medium))}
+.vault-assistant .approval.danger{background:color-mix(in srgb,var(--status-failed) 7%,var(--bg-surface));border-color:var(--status-failed)}
+.vault-assistant .activity .activity-label{color:var(--text-secondary)}
+.vault-assistant .diff-row.add{--diff-row-bg:color-mix(in srgb,var(--status-success) 12%,var(--bg-app))}
+.vault-assistant .diff-row.delete{--diff-row-bg:color-mix(in srgb,var(--status-failed) 12%,var(--bg-app))}
+.vault-assistant .diff-row.empty{--diff-row-bg:var(--bg-surface)}
+.vault-assistant .diff-row.hunk{--diff-row-bg:var(--bg-elevated);color:var(--text-secondary)}
+.vault-assistant .diff-added,.vault-assistant .diff-kind[data-kind="add"],.vault-assistant .add .diff-sign{color:var(--status-success)}
+.vault-assistant .diff-removed,.vault-assistant .diff-kind[data-kind="delete"],.vault-assistant .delete .diff-sign{color:var(--status-failed)}
+.vault-assistant .hljs-keyword,.vault-assistant .hljs-selector-tag,.vault-assistant .hljs-meta{color:var(--code-keyword,var(--text-accent))}
+.vault-assistant .hljs-string,.vault-assistant .hljs-regexp,.vault-assistant .hljs-addition{color:var(--code-string,var(--text-normal))}
+.vault-assistant .hljs-number,.vault-assistant .hljs-literal,.vault-assistant .hljs-attr{color:var(--code-value,var(--text-normal))}
+.vault-assistant .hljs-title,.vault-assistant .hljs-function,.vault-assistant .hljs-built_in,.vault-assistant .hljs-type{color:var(--code-function,var(--text-normal))}
+.vault-assistant .hljs-comment,.vault-assistant .hljs-quote{color:var(--code-comment,var(--text-muted))}

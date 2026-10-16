@@ -1,3 +1,4 @@
+import type { ReferenceData } from "./references.ts";
 export type Obj = Record<string, unknown>;
 export function object(value: unknown): Obj {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Expected object');
@@ -39,7 +40,7 @@ export function usageFrom(result: Obj): Usage {
   const count = (result.rateLimitResetCredits as Obj | null)?.availableCount;
   return { weekly: weekly || null, resetCount: typeof count === 'number' && Number.isInteger(count) && count >= 0 ? count : null };
 }
-export type Thread = { modelEvidence?: ModelEvidence[]; id: string; cwd: string; parentThreadId?: string | null; source?: string | Obj; agentNickname?: string | null; agentRole?: string | null; projectRoot?:string; settings?:Settings; contextManagement?:boolean; approvalsReviewer?:'user'|'auto_review'; name?: string | null; preview?: string; updatedAt?: number; status?: { type: string; activeFlags?: string[] }; turns?: Turn[]; tokenUsage?: TokenUsage; goal?: ThreadGoal | null; goalError?: string };
+export type Thread = Partial<ReferenceData> & { modelEvidence?: ModelEvidence[]; id: string; cwd: string; parentThreadId?: string | null; source?: string | Obj; agentNickname?: string | null; agentRole?: string | null; projectRoot?:string; settings?:Settings; contextManagement?:boolean; approvalsReviewer?:'user'|'auto_review'; name?: string | null; preview?: string; updatedAt?: number; status?: { type: string; activeFlags?: string[] }; turns?: Turn[]; tokenUsage?: TokenUsage; goal?: ThreadGoal | null; goalError?: string };
 export type Notice = { method: string; params: Obj };
 export type PendingRequest = { id: string; method: string; params: Obj; windows: boolean; windowsEvidence?:string[] };
 export function shortTitle(text: string): string {

@@ -167,3 +167,41 @@ Vue 3 + TypeScript + Vite，后端沿用 Node HTTP/SSE；unified/remark 解析�
 Mermaid 12 按需加载，SVG 缓存最多 32 项、总计 4 MiB；图表布局串行执行，进行中的布局无法强制中止，过期结果不会重新插入页面。`lodash-es` 覆盖到 4.18.1，修复 Mermaid 的 Chevrotain 间接锁定旧版本带来的依赖漏洞。
 
 协议以已安装 CLI 生成的 schema 为准；官方文档：[Codex App Server](https://developers.openai.com/codex/app-server/)。先保持这一条运行链路；只有需要原生窗口、系统托盘或独立打包时才考虑 Rust/Tauri。
+
+## Vault Assistant（Obsidian 桌面插件）
+
+插件默认打开 vault 内的独立窗口，复用本服务和 Codex 原生会话。Windows 运行 Obsidian，WSL 运行后端。插件颜色跟随当前 vault 的深浅主题；浏览器 Viewer 保留自己的阅读主题。
+
+Viewer 网页与 Obsidian 插件使用同一个源码主干、后端和应用数据目录。日常开发统一在 `codex-viewer` 主目录进行；`vault-assistant` 旧工作目录仅保留历史，不再独立维护或部署后端。
+
+构建：npm run build:obsidian。将 dist-obsidian 中的 main.js、styles.css、manifest.json 放到 vault 的 .obsidian/plugins/vault-assistant，启用插件。在插件设置中粘贴与网页相同的 Viewer 启动链接并连接当前 vault。链接只用于配对，长期凭据进入本机 Obsidian SecretStorage；插件配置不保存原始令牌。插件可访问后端已授权目录内的项目会话、文件和审批；vault 配对用于笔记入口及文件打开，不再作为会话隔离边界。撤销配对或重新配对会使旧凭据失效。
+
+插件侧栏仅显示当前 Vault 内的会话，新对话默认在当前 Vault 创建。跨项目会话通过转发／引用选择器选择，不进入插件侧栏；顶部显示当前会话的执行目录。跨项目可转发选中的聊天记录，或授权目标会话持续只读引用来源 Session；引用不改变工作目录，也不扩大目标会话的文件写入权限。Vault 内文件在 Obsidian 打开，其他已授权项目文件使用系统应用打开。
+
+助手会话以当前 vault 为工作目录；Codex 按需搜索、读取文件。没有自动跟随阅读、固定材料、发送全文或材料栏。在文件右键菜单选择“讨论该文章”，或在 Markdown 编辑器、阅读视图及 PDF 中选中文字后右键选择“讨论该选区”，打开独立助手窗口、新建会话并预填可编辑草稿。草稿包含 Obsidian 文件链接、准确的 vault 相对路径和用户选区；不会自动发送，也不覆盖其他会话的草稿。命令面板提供当前文章和编辑器选区的同等入口。
+
+通用 CLI：node scripts/vault-cli.ts <vault-name> <command> [parameters...]。固定通过 PowerShell 7 调用 Obsidian.com，参数独立传递；执行保留 Codex 的原生审批。CLI 帮助以本机版本为准，不把退出码 0 当作操作完成的充分证据。Windows CLI 和脚本工具不构成额外沙箱。
+
+历史由 Codex 保存。vault 绑定保存在服务数据目录；旧版本材料记录保留，但新会话不注册 material_read、不传编辑器快照。普通讨论不自动改笔记；明确要求修改时按既有授权执行，保存讨论按钮写入用户选择的 Markdown 笔记。关闭助手窗口不会取消后端任务，断线不自动重发写操作。
+
+v1 边界：每个 vault 一个助手视图，可迁移到普通标签页，界面跟随当前 vault 主题。插件 v1 不承载交互式 MCP Apps；这些仍可在浏览器 Viewer 使用。
+
+助手复用 Viewer 的 Sidebar，按项目分组，包含新对话、会话标题和目录搜索、当前对话全文查找、重命名、删除与保存讨论。删除调用 Codex thread/archive，移出列表并保留原生归档；正在运行、待审批、有活动 Goal 或定时监控的会话须先停止。
+
+统一源码目录：/home/andantex/projects/codex-viewer。插件源码在 obsidian-plugin/，构建产物在 dist-obsidian/；knowbase 安装目录为 D:\Documents\obsidian\knowbase\.obsidian\plugins\vault-assistant。两个入口共用 systemd 用户服务 codex-viewer，地址 http://127.0.0.1:8787，数据位于 /home/andantex/.local/share/codex-viewer。旧 assistant 服务在迁移完成后停用，原工作树与数据保留作回退。
+
+更新插件：在统一源码目录运行 npm run build:obsidian，然后仅复制 dist-obsidian 的 main.js、styles.css、manifest.json 到 knowbase 的插件目录，保留 data.json；运行 node scripts/vault-cli.ts knowbase plugin:reload id=vault-assistant。已有配对和会话草稿无需重建。后端更新仍需在任务空闲时使用 Viewer 的“重启整个后端”；插件收到重启通知后原地重连，不刷新 Obsidian。
+
+迁移数据：先确认两个后端均空闲并停止旧 assistant，再执行 `node scripts/merge-assistant-data.ts <旧数据目录> <Viewer 数据目录> <新备份目录>`。脚本保留 Viewer 原记录，合并配对、引用、巡检、附件与会话设置；SQLite 使用 backup API 保留 WAL 数据，附件元数据路径随目录迁移。有冲突则报错，不覆盖。随后让插件连接统一后端并停用旧服务。原生对话仍由相同 CODEX_HOME 管理，无需复制对话记录。
+
+## 跨会话引用
+
+- **转发聊天记录**：在来源会话点“选择转发”，逐条选择正文；工具记录必须展开后明确勾选，折叠工具不会自动选中。点“转发到…”先选择目标文件夹，再选择其中的会话，或选择“在此文件夹新建对话”，预览完整内容，再加入目标草稿。目标已有文字会保留，最后由用户发送。固定记录不随来源变化，不授予原会话读取权限，也不携带图片或文件实体。
+- **引用 Session**：在目标输入区点“＋ Session”，先选来源文件夹再选会话；也可从来源会话转发 Session，先选目标文件夹，再选会话或在该文件夹新建对话。只有发送后才授予目标会话持续只读权限；AI 可按需列出、搜索、分段读取来源的最新已完成历史。后续轮次仍可读取，在输入区“已授权 Session”中撤销后停止后续读取；撤销不会抹去先前已进入上下文的内容。
+- 引用限于共同后端的已授权目录，可跨 Vault 和项目。引用不递归授予源会话的其他引用、子代理或文件访问权限。只读工具从原生调用元数据确认目标会话，不接受模型自行指定目标身份。
+- 快照保存完整结构化文本，超限明确拒绝，不静默截断；每次发送引用合计上限 64 KiB。Session 默认只读正文，工具记录需明确请求；每页默认 16 KiB、最多 64 KiB，游标固定当次读取视图并在 10 分钟后过期。已发送引用与授权保存在应用数据目录的 `references.sqlite`，服务重启后保留。
+- 新客户端遇到旧后端时隐藏创建入口并保留已有引用草稿；旧客户端仍可使用原有发送协议。排队、插话、重载沿用同一提交标识；提交结果不明时核对历史，避免自动重复发送。
+
+验证：`node --test test/references.test.ts`、`npx playwright test test/references.browser.ts`。`node scripts/check-references.ts` 使用临时 Codex 配置进行真实模型调用，验证旧会话恢复、按需读取、重启和撤销；需要现有登录，会消耗模型额度，不修改全局配置。
+
+网页与 Obsidian 插件连接同一后端时可双向转发和引用。已发送的引用随目标会话在两端显示；未发送草稿保留在发起端。

@@ -1,5 +1,5 @@
 import { realpath, stat, mkdir, readdir, open, unlink } from 'node:fs/promises';
-import { constants } from 'node:fs';
+import { constants, statSync } from 'node:fs';
 import path from 'node:path';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
@@ -7,7 +7,18 @@ import type { IncomingMessage } from 'node:http';
 export class HttpError extends Error { status: number; constructor(status: number, message: string) { super(message); this.status = status; } }
 export const secret = () => randomBytes(32).toString('base64url');
 export function equal(a: string, b: string) { const x = Buffer.from(a); const y = Buffer.from(b); return x.length === y.length && timingSafeEqual(x, y); }
-export function inside(root: string, target: string) { const r = path.relative(root, target); return !r || (!r.startsWith('..' + path.sep) && r !== '..' && !path.isAbsolute(r)); }
+export function inside(root: string, target: string) {
+  root = path.resolve(root); target = path.resolve(target);
+  const r = path.relative(root, target);
+  if (!r || (!r.startsWith('..' + path.sep) && r !== '..' && !path.isAbsolute(r))) return true;
+  // DrvFS preserves input casing; accept aliases only when the filesystem confirms the same root.
+  const prefix = target.slice(0, root.length);
+  if (prefix.toLowerCase() !== root.toLowerCase() || (target.length > root.length && target[root.length] !== path.sep)) return false;
+  try {
+    const a = statSync(root, { bigint: true }), b = statSync(prefix, { bigint: true });
+    return a.isDirectory() && b.isDirectory() && a.dev === b.dev && a.ino === b.ino;
+  } catch { return false; }
+}
 export async function directory(value: string, roots: string[]) {
   const p = await realpath(value).catch(() => { throw new HttpError(404, '目录不存在'); });
   if (!roots.some(root => inside(root, p))) throw new HttpError(403, '目录未在 --root 中授权');

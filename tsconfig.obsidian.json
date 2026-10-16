@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.web.json",
+  "compilerOptions": {
+    "types": [
+      "node",
+      "vite/client"
+    ]
+  },
+  "include": [
+    "obsidian-plugin/**/*.ts",
+    "obsidian-plugin/**/*.vue",
+    "web/**/*.ts",
+    "web/**/*.vue",
+    "shared/**/*.ts"
+  ]
+}

@@ -33,7 +33,10 @@ export class AppServer extends EventEmitter {
   private async launch(): Promise<void> {
     this.buffer = '';
     const args = [...(this.options.args || ['app-server', '--listen', 'stdio://']), ...(this.launchOptions.args || [])];
-    const env = { ...(this.options.env || process.env), ...this.launchOptions.env };
+    const env = { ...(this.options.env || process.env) };
+    // Internal client credentials belong to one app-server, never incidental parent processes or forked workers.
+    for (const key of ['VIEWER_WATCHDOG_URL','VIEWER_WATCHDOG_TOKEN','VIEWER_VAULT_LOG_URL','VIEWER_VAULT_LOG_TOKEN','VIEWER_REFERENCES_URL','VIEWER_REFERENCES_TOKEN']) delete env[key];
+    Object.assign(env,this.launchOptions.env);
     if (this.launchOptions.captureModels) { env.RUST_LOG = `${env.RUST_LOG || 'error'},${modelCaptureLog}`; env.NO_COLOR = '1'; }
     const child = spawn(this.options.command || 'codex', args, {
       cwd: this.options.cwd, env, stdio: ['pipe', 'pipe', 'pipe'], shell: false,
@@ -78,7 +81,7 @@ export class AppServer extends EventEmitter {
       } else if (typeof m.id === 'number') {
         const p = this.pending.get(m.id); if (!p) return;
         clearTimeout(p.timer); this.pending.delete(m.id);
-        if (m.error) p.reject(new Error(string(object(m.error).message)));
+        if (m.error) p.reject(Object.assign(new Error(string(object(m.error).message)), { codexRejected: true }));
         else p.resolve(object(m.result ?? {}));
       }
     } catch { this.emit('protocolError'); this.child?.kill(); }

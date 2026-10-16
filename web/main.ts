@@ -1,3 +1,4 @@
+import { viewerDocument, viewerWindow, viewerRoot } from './environment.ts';
 import { createApp } from 'vue';
 import App from './App.vue';
 import './style.css';
@@ -9,5 +10,5 @@ export function mountViewer(element: Element) {
   return () => app.unmount();
 }
 
-export const unmount = mountViewer(document.querySelector('#app')!);
+export const unmount = mountViewer(viewerDocument().querySelector('#app')!);
 if (import.meta.hot) import.meta.hot.dispose(unmount);

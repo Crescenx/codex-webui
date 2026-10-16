@@ -5,8 +5,8 @@ const store = useViewer(), dialog = ref<HTMLDialogElement>(), input = ref<HTMLIn
 const name = ref(''), error = ref(''), busy = ref(false);
 let threadId = '', generation = 0;
 function close() { ++generation; busy.value = false; }
-async function show() {
-  const t = store.current.value; if (!t) return;
+async function show(id?:string) {
+  const t = id ? store.threads.value.find(t=>t.id===id) : store.current.value; if (!t) return;
   close(); const gen = generation;
   threadId = t.id; name.value = threadTitle(t); error.value = ''; dialog.value?.showModal();
   await nextTick(); if (gen === generation) { input.value?.focus(); input.value?.select(); }

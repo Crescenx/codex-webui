@@ -16,7 +16,8 @@
     "test:live": "node scripts/live.ts",
     "service:install": "node scripts/service.ts",
     "shortcut:install": "node scripts/shortcut.ts",
-    "open": "node scripts/open.ts"
+    "open": "node scripts/open.ts",
+    "build:obsidian": "vue-tsc --noEmit -p tsconfig.obsidian.json && vite build --config vite.obsidian.config.ts && node scripts/package-obsidian.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/client": "^2.0.0",
@@ -48,8 +49,10 @@
     "@types/mdast": "^4.0.4",
     "@types/node": "^24.0.0",
     "@vitejs/plugin-vue": "^6.0.8",
+    "esbuild": "^0.28.2",
     "mdast-util-from-markdown": "^2.0.0",
     "micromark-util-types": "^2.0.0",
+    "obsidian": "^1.14.4",
     "typescript": "^5.9.2",
     "vite": "^7.1.0",
     "vue-tsc": "^3.3.11"
