@@ -5,13 +5,13 @@ import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, watch } f
 import { createViewerStore, threadTitle, viewerKey } from './store.ts';
 import Sidebar from './components/Sidebar.vue';
 import Conversation from './components/Conversation.vue';
+import SessionInfo from './components/SessionInfo.vue';
 import Composer from './components/Composer.vue';
 import ApprovalCard from './components/ApprovalCard.vue';
 import FolderDialog from './components/FolderDialog.vue';
 import NameDialog from './components/NameDialog.vue';
 import SkillsDialog from './components/SkillsDialog.vue';
 import UsageBar from './components/UsageBar.vue';
-import ModelCheck from './components/ModelCheck.vue';
 import WatchdogPanel from './components/WatchdogPanel.vue';
 import SubagentPanel from './components/SubagentPanel.vue';
 import { createTranscriptMemory, transcriptMemoryKey } from './transcript.ts';
@@ -28,6 +28,7 @@ const overlay = computed(() => viewport.value - (sidebarVisible.value ? sidebarW
 const watchdogCount = computed(() => store.state.watchdogs.filter(w => w.threadId === store.state.currentId && w.state !== 'deleted').length);
 let panelTrigger: HTMLElement | null = null;
 function closePanel() { auxiliary.value = ''; void nextTick(() => panelTrigger?.focus()); }
+watch(()=>current.value?.id,()=>{if(current.value?.capabilities?.watchdogs===false)auxiliary.value='';});
 function openPanel(panel: 'watchdogs' | 'agents') {
   if (auxiliary.value === panel) { closePanel(); return; }
   panelTrigger = viewerDocument().activeElement as HTMLElement;
@@ -74,9 +75,8 @@ onBeforeUnmount(() => { store.dispose(); transcriptMemory.clear(); viewerWindow(
     <button id="menu" class="rail-tab quiet" aria-label="展开会话栏" title="展开会话栏" aria-controls="sidebar" :aria-expanded="false" @click="toggleSidebar">展开会话</button>
   </aside>
   <main :inert="!!auxiliary && overlay">
-    <header class="topbar"><div class="session-heading"><h1 id="title">{{ current ? threadTitle(current) : '开始一个新任务' }}</h1><div class="directory-line"><div id="cwd" class="subtle" :title="current?.cwd">{{ current?.cwd || '选择项目，让工作留在 WSL' }}</div><button v-if="current" class="quiet" aria-label="复制项目路径" @click="copyDirectory">复制路径</button></div></div><div class="topbar-actions"><button id="rename" class="quiet" :hidden="!current" @click="name?.show()">重命名</button><button id="watchdogs-toggle" class="quiet" aria-label="展开 Watchdogs" aria-controls="watchdog-rail" :aria-expanded="auxiliary === 'watchdogs'" @click="openPanel('watchdogs')">Watchdog <span>{{ watchdogCount }}</span></button><button id="agents-toggle" class="quiet" aria-label="展开 Subagents" aria-controls="subagents" :aria-expanded="auxiliary === 'agents'" @click="openPanel('agents')">子代理 <span>{{ store.agents.value.length }}</span></button></div></header>
+    <header class="topbar"><div class="session-heading"><h1 id="title">{{ current ? threadTitle(current) : '开始一个新任务' }}</h1><div class="directory-line"><div id="cwd" class="subtle" :title="current?.cwd">{{ current?.cwd || '选择项目，让工作留在 WSL' }}</div><button v-if="current" class="quiet" aria-label="复制项目路径" @click="copyDirectory">复制路径</button></div></div><div class="topbar-actions"><SessionInfo v-if="current" :key="current.id" /><button id="rename" class="quiet" :hidden="!current" @click="name?.show()">重命名</button><button v-if="current?.capabilities?.watchdogs!==false" id="watchdogs-toggle" class="quiet" aria-label="展开 Watchdogs" aria-controls="watchdog-rail" :aria-expanded="auxiliary === 'watchdogs'" @click="openPanel('watchdogs')">Watchdog <span>{{ watchdogCount }}</span></button><button v-if="current?.capabilities?.subagents!==false" id="agents-toggle" class="quiet" aria-label="展开 Subagents" aria-controls="subagents" :aria-expanded="auxiliary === 'agents'" @click="openPanel('agents')">子代理 <span>{{ store.agents.value.length }}</span></button></div></header>
     <div id="error" role="alert" :hidden="!error">{{ error }}</div>
-    <ModelCheck />
     <section class="reading-area"><Conversation ref="conversation" search-in-sidebar @find="sidebarCollapsed=false" :key="store.state.currentId" @new="folder?.show()" /></section>
     <section class="interaction-area" aria-label="输入与待处理请求">
     <section id="approvals" aria-label="待处理请求"><ApprovalCard v-for="r in approvals" :key="r.id" :request="r" /></section>

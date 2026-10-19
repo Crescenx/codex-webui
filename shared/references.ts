@@ -23,10 +23,10 @@ export function referenceSelectable(item: Item, turn: Pick<Turn, 'status'>): boo
 }
 
 // Only public text fields are exported. In particular MCP _meta and app resources are not records.
-function publicValue(value: unknown): unknown {
+export function publicValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(publicValue);
   if (!value || typeof value !== 'object') return value;
-  return Object.fromEntries(Object.entries(value).filter(([k]) => !/^(_meta|authorization|cookie|token|access_token|api_key|password|secret)$/i.test(k)).map(([k,v]) => [k, publicValue(v)]));
+  return Object.fromEntries(Object.entries(value).filter(([k]) => !/^(_meta|encrypted_?content|authorization|cookie|token|access_token|api_key|password|secret)$/i.test(k)).map(([k,v]) => [k, publicValue(v)]));
 }
 function textContent(value: unknown): string {
   if (!Array.isArray(value)) return '';
@@ -45,7 +45,7 @@ export function recordEntry(item: Item, turn: Pick<Turn, 'id' | 'status'>): Reco
     if (item.questions?.length) text += '\n' + item.questions.map(q => q.title + (q.options ? '\n' + q.options.join('\n') : '')).join('\n');
   } else {
     const fields: Record<string, unknown> = {};
-    for (const key of ['server', 'tool', 'command', 'arguments', 'status', 'exitCode', 'aggregatedOutput', 'changes', 'query', 'action']) if (item[key] !== undefined) fields[key] = publicValue(item[key]);
+    for (const key of ['server', 'tool', 'command', 'arguments', 'status', 'exitCode', 'aggregatedOutput', 'changes', 'query', 'action', 'title', 'kind', 'rawInput', 'rawOutput']) if (item[key] !== undefined) fields[key] = publicValue(item[key]);
     const result = item.result as Record<string, unknown> | undefined;
     if (result && typeof result === 'object') {
       fields.result = { text: textContent(result.content), ...(result.structuredContent !== undefined ? { structuredContent: publicValue(result.structuredContent) } : {}) };

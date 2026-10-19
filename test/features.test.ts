@@ -47,6 +47,9 @@ test('activity lifecycle, summaries and plans are reduced without empty details'
   assert.equal(activity(turn.items[0],turn).detail,'checking');
   turn.status='interrupted';assert.equal(activity(turn.items[0],turn).state,'cancelled');
   assert.equal(activity({id:'c',type:'commandExecution',status:'completed',exitCode:1},turn).state,'failed');
+  const read=activity({id:'read',type:'dynamicToolCall',tool:'view_file',result:{summary:'View lec08.pdf',path:'/tmp/lec08.pdf'}},turn);
+  assert.equal(read.subject,'View lec08.pdf');assert.match(read.detail,/"path": "\/tmp\/lec08.pdf"/);
+  assert.equal(activity({id:'read',type:'dynamicToolCall',result:{summary:null}},turn).subject,'');
   reduceNotice(t,{method:'item/plan/delta',params:{...params,itemId:'p',delta:'a plan'}});assert.equal(turn.items[1].text,'a plan');
 });
 test('short titles and metadata refresh preserve live state and explicit cleared names',()=>{

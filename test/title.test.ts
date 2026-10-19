@@ -33,3 +33,37 @@ test('title generation is isolated, ephemeral, bounded and validates model outpu
     assert.equal(malformed.listenerCount('offline'), 0);
   }
 });
+
+
+test('Google titles use the Google worker with isolated storage and no tools', async () => {
+  const {RuntimeServers} = await import('../server/runtimes.ts');
+  const {access} = await import('node:fs/promises');
+  const codex = new AppServer();
+  codex.fork = () => {throw Error('Google title must not call Codex');};
+  const google = new AppServer({command:process.execPath,args:[path.resolve('test/fake-codex.ts')]});
+  const fork = google.fork.bind(google);
+  let state = '', unloaded = false;
+  google.fork = () => {
+    const worker = fork();
+    const configure = worker.configureLaunch.bind(worker);
+    worker.configureLaunch = options => {state=options.env!.AGY_APP_SERVER_HOME!;configure(options);};
+    const call = worker.call.bind(worker);
+    worker.call = async (method, params = {}) => {
+      if (method === 'thread/start') {
+        assert.equal(params.model,'mock');assert.equal(params.ephemeral,true);
+        assert.deepEqual(params.config,{tools_disabled:true,mcp_servers:{}});
+        assert.equal(path.dirname(state),params.cwd);
+        assert.ok(params.baseInstructions);assert.ok(params.developerInstructions);
+      }
+      if (method === 'turn/start') {assert.ok(params.outputSchema);assert.equal(params.effort,undefined);}
+      if (method === 'thread/unload') unloaded=true;
+      return call(method,params);
+    };
+    return worker;
+  };
+  const parent = new RuntimeServers(codex,google);
+  assert.equal(await generateTitle(parent,'编写线性代数补习讲义','antigravity/mock'),'概括任务目的');
+  assert.ok(unloaded);assert.ok(state);await assert.rejects(access(path.dirname(state)));
+  assert.equal(codex.child,undefined);assert.equal(google.child,undefined);
+  assert.equal(parent.listenerCount('offline'),0);
+});

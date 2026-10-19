@@ -65,7 +65,7 @@ try {
   assert.ok(states.includes('active') && states.includes('complete'), JSON.stringify({ states, requests }));
   assert.equal(turns.size, 2, 'Codex must continue the active goal across turns');
   const before = (await http(route + '/open', {})).thread as Thread;
-  assert.equal(before.goal!.status, 'complete'); assert.ok(before.goal!.tokensUsed > 0);
+  assert.equal(before.goal!.status, 'complete'); assert.ok(before.goal!.tokensUsed !== null && before.goal!.tokensUsed > 0);
   await adapter.restart();
   const after = (await http(route + '/open', {})).thread as Thread;
   assert.equal(after.goal!.status, 'complete'); assert.equal(after.goal!.tokensUsed, before.goal!.tokensUsed);

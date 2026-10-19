@@ -7,7 +7,7 @@ import { AppServer } from '../server/adapter.ts';
 
 async function keyboardFocus(page:Page) {
   await page.locator('#conversation').focus();
-  for (const id of ['model','effort','mode','skills-button','goal-button','settings-toggle','prompt']) {
+  for (const id of ['model','effort','mode','skills-button','goal-button','prompt']) {
     await page.keyboard.press('Tab');
     const target=page.locator('#'+id);
     await expect(target).toBeFocused();
@@ -28,7 +28,7 @@ async function keyboardFocus(page:Page) {
   const contrast=await page.locator('#settings-state').evaluate(el=>{
     const luminance=(color:string)=>color.match(/\d+/g)!.slice(0,3).map(Number).map(v=>v/255).map(v=>v<=0.04045?v/12.92:((v+0.055)/1.055)**2.4).reduce((sum,v,i)=>sum+v*[0.2126,0.7152,0.0722][i],0);
     const fg=luminance(getComputedStyle(el).color);
-    const bg=luminance(getComputedStyle(el.closest('#composer')!).backgroundColor);
+    const bg=luminance(getComputedStyle(el.closest('.session-info-panel')!).backgroundColor);
     return (Math.max(fg,bg)+0.05)/(Math.min(fg,bg)+0.05);
   });
   expect(contrast).toBeGreaterThanOrEqual(4.5);
@@ -178,7 +178,9 @@ test('render, source copy, upload, approval and reconnect', async ({page,context
     await page.locator('#welcome-new').click(); await page.getByRole('button',{name:'▱ '+root,exact:true}).click(); await page.locator('#folder-select').click();
     await expect(page.locator('#settings-state')).toContainText('模拟配置加载失败');await expect(page.locator('#model')).toBeDisabled();
     await page.locator('#skills-button').click();await expect(page.locator('#skill-list')).toContainText('Skills 加载失败');await page.getByRole('button',{name:'关闭 Skills',exact:true}).click();
+    await page.locator('#settings-toggle').click();
     await page.unroute('**/api/controls?*');await page.locator('#controls-retry').click();await expect(page.locator('#model')).toBeEnabled();
+    await page.keyboard.press('Escape');
     await page.route('**/api/controls?*',async route=>{const response=await route.fetch();const data=await response.json();await route.fulfill({response,json:{...data,skills:[]}});});
     await page.reload();await expect(page.locator('#model')).toBeEnabled();await page.locator('#skills-button').click();await expect(page.locator('#skill-list')).toContainText('没有发现可用的 Skill');
     await page.unroute('**/api/controls?*');await page.getByRole('button',{name:'重新加载',exact:true}).click();await expect(page.getByRole('button',{name:'用于本轮',exact:true})).toBeVisible();await page.getByRole('button',{name:'关闭 Skills',exact:true}).click();

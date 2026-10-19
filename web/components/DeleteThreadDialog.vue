@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 import { threadTitle, useViewer } from '../store.ts';
 const store=useViewer(),dialog=ref<HTMLDialogElement>(),id=ref(''),title=ref(''),busy=ref(false),error=ref('');
 function show(threadId:string){id.value=threadId;const t=store.threads.value.find(t=>t.id===threadId);title.value=t?threadTitle(t):threadId;error.value='';dialog.value?.showModal();}

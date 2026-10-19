@@ -1,4 +1,4 @@
-import { realpath, stat, mkdir, readdir, open, unlink } from 'node:fs/promises';
+import { realpath, stat, mkdir, readdir, open, unlink, writeFile } from 'node:fs/promises';
 import { constants, statSync } from 'node:fs';
 import path from 'node:path';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -80,10 +80,22 @@ export class Uploads {
     } finally { this.busy = false; }
   }
   async cleanup() {
-    for (const name of await readdir(this.root)) {
+    const files=await readdir(this.root),retained=new Set(files.filter(n=>/^[0-9a-f-]{36}\.retained$/.test(n)).map(n=>n.slice(0,36)));
+    for (const name of files) {
       if (!/^[0-9a-f-]{36}\.[a-z0-9]+$/.test(name)) continue;
+      if(retained.has(name.slice(0,36)))continue;
       const p = path.join(this.root, name);
       if (Date.now() - (await stat(p)).mtimeMs > 30 * 86400_000) await unlink(p);
+    }
+  }
+  async retainIn(records:unknown) {
+    const text=JSON.stringify(records);
+    for(const name of await readdir(this.root)) {
+      if(!/^[0-9a-f-]{36}\.json$/.test(name))continue;
+      const id=name.slice(0,36);
+      if(!text.includes(id))continue;
+      const file=await this.get(id);
+      if(text.includes(file.path))await writeFile(path.join(this.root,id+'.retained'),'Referenced by a hybrid conversation\n',{flag:'wx',mode:0o600}).catch(error=>{if(error.code!=='EEXIST')throw error;});
     }
   }
 }

@@ -91,6 +91,17 @@ export function renderMarkdown(source: string, threadId?: string, cache = new Ma
             let target = '';
             // HAST URLs are URI-encoded; file APIs and the clipboard take native paths.
             try { target = decodeURIComponent(href); } catch { /* incomplete URL */ }
+            if(/^file:/i.test(href)) {
+              target='';
+              try {
+                const uri=new URL(href);
+                if(!uri.hostname || uri.hostname==='localhost') {
+                  target=decodeURIComponent(uri.pathname);
+                  target=target.replace(/^\/([a-z]):\//i,(_,drive:string)=>'/mnt/'+drive.toLowerCase()+'/');
+                  if(uri.hash && /^#L\d+$/.test(uri.hash))target+=uri.hash;
+                }
+              } catch { /* malformed local file URL */ }
+            }
             if(href.startsWith('obsidian://open?') && materialVault()){
               try{const uri=new URL(href);target=uri.searchParams.get('vault')===materialVault()?uri.searchParams.get('file')||'':'';
                 if(target.startsWith('/') || target.includes('\\') || target.split('/').some(p=>p==='..'||p==='.'))target='';
@@ -103,7 +114,7 @@ export function renderMarkdown(source: string, threadId?: string, cache = new Ma
             }
           }
           if(node.properties.dataExternal)node.children.push({type:'element',tagName:'small',properties:{dataCopyIgnore:'',className:['link-target']},children:[{type:'text',value:' · '+new URL(href).hostname}]});
-          if(!node.properties.dataExternal&&!node.properties.dataFile&&href)node.children.push({type:'element',tagName:'small',properties:{dataCopyIgnore:'',className:['link-target']},children:[{type:'text',value:' · '+href+'（不可打开）'}]});
+          if(!node.properties.dataExternal&&!node.properties.dataFile&&href)node.children.push({type:'element',tagName:'small',properties:{dataCopyIgnore:'',className:['link-target']},children:[{type:'text',value:' · '+href+'（暂不支持此链接格式）'}]});
           node.properties.target = '_blank'; node.properties.rel = ['noopener','noreferrer'];
         }
       }

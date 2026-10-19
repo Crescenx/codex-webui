@@ -2,7 +2,6 @@ import { reactive } from 'vue';
 import type { InjectionKey } from 'vue';
 import type { VirtualItem } from '@tanstack/vue-virtual';
 import type { Item, Turn } from '../shared/protocol.ts';
-import { itemResource } from '../shared/mcp-apps.ts';
 import { activity, activityState } from './activity.ts';
 import { renderMarkdown } from './render.ts';
 import type { Rendered } from './render.ts';
@@ -33,7 +32,7 @@ export function groupTraces(rows: TranscriptRow[]): TranscriptRow[] {
   for (const row of rows) {
     if (previous?.turn.id !== row.turn.id) { previous = undefined; pending.length = 0; }
     const item = row.original;
-    if (['agentMessage', 'userMessage', 'plan'].includes(item.type) || item.type === 'mcpToolCall' && itemResource(item)) {
+    if (['agentMessage', 'userMessage', 'plan', 'handoff'].includes(item.type)) {
       if (['agentMessage', 'plan'].includes(item.type) && (item.text?.trim() || item.questions?.length)) {
         for (const group of pending) group.active = false;
         pending.length = 0;
@@ -47,7 +46,7 @@ export function groupTraces(rows: TranscriptRow[]): TranscriptRow[] {
   }
   return rows;
 }
-export function traceRows(rows: TranscriptRow[], reading: Reading, heldTrace = '', openApps?: ReadonlySet<string>): TranscriptRow[] {
+export function traceRows(rows: TranscriptRow[], reading: Reading, heldTrace = ''): TranscriptRow[] {
   return rows.flatMap(row => {
     const group = row.trace;
     if (!group) return [row];
@@ -55,7 +54,7 @@ export function traceRows(rows: TranscriptRow[], reading: Reading, heldTrace = '
     if (view.traceActive !== group.active) { view.traceActive = group.active; view.open = group.active; }
     const open = view.open || heldTrace === group.key;
     const header = group.firstKey === row.key ? [{ ...row, key: group.key, traceHeader: true, traceOpen: open }] : [];
-    return open || openApps?.has(row.key) ? [...header, row] : header;
+    return open ? [...header, row] : header;
   });
 }
 export type Reading = { follow: boolean; anchor: string; inset: number; offset: number; width: number; measurements: VirtualItem[]; items: Map<string, ItemView> };
@@ -96,6 +95,6 @@ export function messageSource(item: Item): string {
 }
 export function searchableText(item: Item, turn: Turn): string {
   if (item.type === 'fileChange') return (item.changes || []).map(f => [f.path, f.kind.type === 'update' ? f.kind.move_path : '', f.diff].filter(Boolean).join('\n')).join('\n');
-  if (['agentMessage', 'userMessage', 'plan'].includes(item.type)) return [messageSource(item), ...(item.questions || []).map(q => q.title)].filter(Boolean).join('\n');
+  if (['agentMessage', 'userMessage', 'plan', 'handoff'].includes(item.type)) return [messageSource(item), ...(item.questions || []).map(q => q.title)].filter(Boolean).join('\n');
   const info = activity(item, turn); return [info.title, info.detail].filter(Boolean).join('\n');
 }

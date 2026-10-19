@@ -12,7 +12,7 @@ test('explicit forwarding excludes collapsed tools, previews exact records, pres
     const headers={origin:app.origin};
     const create=async(name:string)=>{const {thread}=await(await page.request.post(app.origin+'/api/threads',{headers,data:{cwd:dir}})).json();await page.request.post(app.origin+'/api/threads/'+thread.id+'/name',{headers,data:{name}});return thread.id;};
     const source=await create('来源讨论'),target=await create('目标讨论');
-    await adapter.call('mock/mcpApp',{threadId:source,turnId:'record-turn',items:[{id:'u',type:'userMessage',content:[{type:'text',text:'用户选中的问题'}]},{id:'tool',type:'commandExecution',command:'echo evidence',aggregatedOutput:'明确工具证据',status:'completed'},{id:'a',type:'agentMessage',text:'助手选中的回答'}]});
+    await adapter.call('mock/turn',{threadId:source,turnId:'record-turn',items:[{id:'u',type:'userMessage',content:[{type:'text',text:'用户选中的问题'}]},{id:'tool',type:'commandExecution',command:'echo evidence',aggregatedOutput:'明确工具证据',status:'completed'},{id:'a',type:'agentMessage',text:'助手选中的回答'}]});
     await page.evaluate(id=>localStorage.setItem('viewer-draft:'+id,'目标原有草稿'),target);
     await page.goto(app.origin+'/#'+source);await page.getByRole('button',{name:'选择转发',exact:true}).click();
     await expect(page.getByLabel('选择此工具记录',{exact:true})).toHaveCount(0);

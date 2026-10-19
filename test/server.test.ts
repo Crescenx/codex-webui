@@ -41,6 +41,26 @@ test('late turn/start cannot undo completion; Windows access is flagged', () => 
   reduceNotice(t,{method:'turn/started',params:{threadId:'t',turn:{id:'a',status:'inProgress',items:[]}}});
   assert.equal(t.status?.type,'idle'); assert.ok(windowsEvidence({command:'powershell.exe Get-Date'}).length); assert.equal(windowsEvidence({command:'pwd'}).length,0);
 });
+test('retired app and model-check endpoints cannot dispatch work, and stale app context is rejected', async () => {
+  const dir = await mkdtemp('/tmp/viewer-retired-');
+  const adapter = new AppServer({ command: process.execPath, args: [path.resolve('test/fake-codex.ts')] });
+  const app = await serve({ roots: [dir], dataDir: dir + '/data', runtimeDir: dir + '/run', port: 0, adapter });
+  try {
+    const login = await fetch(app.launchUrl, { redirect: 'manual' }), cookie = login.headers.get('set-cookie')!.split(';')[0];
+    const request = (route: string, data: unknown = {}) => fetch(app.origin + '/api' + route, { method: 'POST', headers: { cookie, origin: app.origin, 'content-type': 'application/json' }, body: JSON.stringify(data) });
+    const { thread } = await (await request('/threads', { cwd: dir })).json();
+    let calls = 0;
+    const call = adapter.call.bind(adapter);
+    adapter.call = async (method, params) => { calls++; return call(method, params); };
+    assert.equal((await request(`/threads/${thread.id}/mcp-apps/turn/item/open`)).status, 404);
+    assert.equal((await request('/mcp-apps/' + 'a'.repeat(48) + '/rpc', { method: 'tools/call', params: {} })).status, 404);
+    assert.equal((await request(`/threads/${thread.id}/model-check`)).status, 404);
+    const stale = await request(`/threads/${thread.id}/turns`, { text: 'stale app message', attachments: [], appContexts: [] });
+    assert.equal(stale.status, 400); assert.match((await stale.json()).error, /应用上下文已停用/);
+    assert.equal(calls, 0);
+    assert.match(login.headers.get('content-security-policy')!, /frame-src 'none'/);
+  } finally { await app.stop(); await rm(dir, { recursive: true, force: true }); }
+});
 test('delta updates replace only their item and leave prior snapshots untouched', () => {
   const t: Thread = { id: 't', cwd: '/tmp', turns: [{ id: 'turn', status: 'inProgress', items: [
     { id: 'log', type: 'commandExecution', aggregatedOutput: 'old' },

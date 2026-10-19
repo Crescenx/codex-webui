@@ -40,6 +40,21 @@ function setup(nextCursor: string | null = null) {
 }
 const tick = () => new Promise<void>(resolve => setImmediate(resolve));
 
+
+test('managed Codex snapshots preserve local settings and drafts and gate sends while locked',async()=>{
+  const h=setup();
+  try{
+    const opening=h.store.selectThread('a');h.pending[0].job.resolve(snapshot('a'));await opening;
+    h.store.setText('retain my draft');h.store.setSettings({model:'codex-choice',effort:'high',mode:'plan'});
+    const next:Thread={...thread('a'),runtimeId:'codex',settings:{model:'mock',effort:null,mode:'default'},hybrid:{activeSessionId:'managed:test',bindings:[{sessionId:'a',runtimeId:'codex'},{sessionId:'managed:test',runtimeId:'codex'}],handoffs:[],locked:true}};
+    h.emit({method:'viewer/hybridChanged',seq:10,params:{threadId:'a',thread:next}});
+    assert.equal(h.store.current.value?.runtimeId,'codex');assert.equal(h.store.draft.value?.text,'retain my draft');
+    assert.equal(h.store.draft.value?.desired?.model,'codex-choice');assert.equal(h.store.draft.value?.dirty,true);assert.equal(h.store.canSend.value,false);
+    h.emit({method:'viewer/hybridChanged',seq:11,params:{threadId:'a',thread:{...next,hybrid:{...next.hybrid,locked:false}}}});await tick();
+    assert.equal(h.store.canSend.value,true);
+  }finally{h.store.dispose();}
+});
+
 test('creation uses its snapshot and sends with effective settings while optional reads are pending', async () => {
   const h = setup();
   try {
@@ -295,6 +310,26 @@ test('usage keeps account scope, authoritative reset count and live context acro
     const failed = h.store.loadUsage(); h.pending[3].job.reject(new Error('not supported')); await failed;
     assert.equal(h.store.state.usage.resetCount, null); assert.equal(h.store.state.error, '');
   } finally { h.store.dispose(); }
+});
+
+test('Google quotas survive conversion and newer events without changing Codex allowance', async () => {
+  const primary={usedPercent:12,windowDurationMins:300};
+  const raw={rateLimitsByLimitId:{'antigravity-google':{primary,secondary:{usedPercent:NaN,windowDurationMins:10080}},'antigravity-external':{primary:null,secondary:{usedPercent:42,windowDurationMins:10080}}}};
+  const usage=usageFrom(raw);
+  assert.equal(usage.weekly,null);
+  assert.deepEqual(usage.antigravity?.google,{primary,secondary:null});
+  assert.equal(usage.antigravity?.external.secondary?.usedPercent,42);
+  const h=setup();
+  try {
+    await tick();h.held.add('/usage');
+    const read=h.store.loadUsage();
+    h.emit({method:'account/rateLimits/updated',params:raw,seq:1});
+    h.pending[0].job.resolve({weekly:{usedPercent:27,windowDurationMins:10080},resetCount:2,errors:{antigravity:'stale failure'}});
+    await read;
+    assert.equal(h.store.state.usage.antigravity?.google.primary?.usedPercent,12);
+    assert.equal(h.store.state.usage.weekly?.usedPercent,27);
+    assert.ok(!h.store.state.usage.errors?.antigravity);
+  } finally {h.store.dispose();}
 });
 
 test('list refresh repairs status without replacing history or racing live events and snapshots', async () => {

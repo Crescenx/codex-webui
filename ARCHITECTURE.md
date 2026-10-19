@@ -1,10 +1,18 @@
 # Codex Viewer architecture
 
+Viewer-managed delegation runs Codex tasks in independent working copies. `server/hybrid.ts` retains logical conversations, operation receipts and result delivery; `server/agents-mcp.ts` authenticates native caller metadata. `server/agent-workspace.ts` applies inspected changes using three-way merge and recovery journals. Native and managed Codex descendants share the existing subagent panel.
+
+## Runtime boundary
+
+`server/runtimes.ts` multiplexes Codex and the optional Antigravity Rust stdio app-server. Models use `antigravity/` and threads use `agy:` prefixes; approval IDs retain provider ownership. `server/hybrid.ts` preserves each provider's native binding and delivers incremental history when switching models. Goal activation injects pending history before starting the native Goal, with durable receipts preventing replay of unknown outcomes. List and quota reads retain healthy-provider results on partial failure. Google quota groups survive the shared usage DTO through to the UI, separate from Codex reset credits.
+
+The previous ACP transport and skills bridge remain removed. Historical `antigravity:` bindings are retained but excluded from execution; they are not aliases for new `agy:` sessions. The Rust process owns a Viewer-specific state directory even when the parent environment defines another app-server home.
+
 Codex Viewer is a local, single-user Vue application backed by the existing Node HTTP/SSE bridge and Codex App Server. Raw messages remain canonical. This migration adds component and state boundaries; runtime plugin loading is a future feature.
 
 ## Ownership and dependencies
 
-Goal is native per-thread state, independent of collaboration mode. Viewer exposes `GET/POST /api/threads/:id/goal` and `POST /api/threads/:id/goal/clear`, backed by `thread/goal/get/set/clear`. Shared reducers consume native goal notifications, while guarded reads restore snapshots after reconnect. Model calls to native goal tools use the same state and require no Viewer MCP wrapper. Activation first synchronizes effective thread settings and lets Codex start its own turn. Interrupt-and-send temporarily pauses the goal to prevent continuation racing the replacement input; an unconfirmed submission is never replayed. Active goals also reserve their thread between turns against Watchdog dispatch and planned backend restart.
+Codex Goal is native per-thread state, independent of collaboration mode. Viewer exposes `GET/POST /api/threads/:id/goal` and `POST /api/threads/:id/goal/clear`, backed by `thread/goal/get/set/clear`. Shared reducers consume native goal notifications, while guarded reads restore snapshots after reconnect. Model calls to native goal tools use the same state and require no Viewer MCP wrapper. Activation first synchronizes effective thread settings and lets Codex start its own turn. Interrupt-and-send temporarily pauses the goal to prevent continuation racing the replacement input; an unconfirmed submission is never replayed. Active goals also reserve their thread between turns against Watchdog dispatch and planned backend restart.
 
 Run `node scripts/check-goals.ts` for an isolated real-Codex check with deterministic local model responses: native tool exposure, a natural-language message invoking goal creation, two-turn continuation, usage, budget clearing, and restart recovery. It uses no credentials or paid model calls. UI and race coverage lives in the existing Node/Playwright test commands.
 
@@ -61,13 +69,7 @@ Each run persists its unique native message ID before submission. Lost acknowled
 
 ## Rendering and lifecycle
 
-`McpAppBlock` lazily loads the official MCP Apps `AppBridge`. Original MCP results remain canonical and copyable. Opening an app pins its transcript row; scrolling does not reload it. Close/thread switch releases the bridge, transport, observers, timers and frame. Reload and disconnect require explicit reopening. The store retains only each app's latest context per thread, in memory. Text and image provenance enter native untrusted `additionalContext` on the next explicit send; image bytes enter native `image` inputs with a host-written untrusted-source label. Base64 never becomes textual model context. The same conversion applies to start, steer and interrupt/flush. Encoded app contexts share a 6 MiB thread budget; text retains its 128 KiB cap, with at most ten PNG/JPEG/WebP images of 4 MiB each. Node checks base64 encoding, MIME signatures, limits and source ownership. Only the turn submission route allows the larger request body. App messages use an editable confirmation dialog and the existing sender without consuming the composer's draft.
-
-`server/mcp-apps.ts` binds random, expiring instance tickets to the Viewer session and original thread/turn/item. Tool and resource RPCs use the existing App Server connection and the original server identity; tool visibility, JSON Schema arguments and readonly subagent restrictions are enforced in Node. Native elicitations use the existing pending-request flow. Calls are serialized per instance and uncertain tool timeouts are not replayed. No global MCP configuration or separate MCP authentication is introduced.
-
-Each instance has a distinct `<ticket>.localhost` origin on a separate loopback listener. That listener serves only the trusted sandbox relay and its bundled script, with a per-resource CSP; it serves no Viewer APIs, cookies or app data. The authenticated host sends HTML through a source-and-origin-bound transport into a nested sandbox iframe. The host's script CSP remains unchanged. The relay and inner document inherit the restricted HTTP CSP, no external sources unless explicitly declared as HTTPS, and no camera/microphone/clipboard permissions. There are at most 64 active tickets; a 60-second heartbeat keeps mounted apps alive, and abandoned tickets expire after three minutes.
-
-The host declares `io.modelcontextprotocol/ui` during App Server initialization. Codex 0.154.0 does not forward that extension to MCP servers, although native resource/tool/elicitation methods work; servers that withhold UI metadata until negotiation need a newer compatible backend. `scripts/check-mcp-apps.ts` reports this distinction, with an optional strict negotiation check.
+MCP tool results use the same activity renderer as other tools. Native MCP form and URL elicitations use the pending-request flow; form responses are validated against the server-provided JSON Schema before delivery. The Viewer does not host embedded MCP applications or expose their resource/tool RPCs.
 
 Vue owns component structure and stable keys. `MessageBody` owns an empty Markdown container whose descendants are managed exclusively by the existing renderer. `ActivityBlock` uses the existing highlighter on code containers; unchanged output keeps its DOM. No unsanitized message HTML enters Vue templates.
 

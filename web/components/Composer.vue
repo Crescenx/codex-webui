@@ -2,7 +2,7 @@
 import { viewerDocument, viewerWindow, viewerRoot } from '../environment.ts';
 
 import { computed, nextTick, ref, watch } from 'vue';
-import type { Settings, Skill } from '../../shared/protocol.ts';
+import type { Skill } from '../../shared/protocol.ts';
 import { useViewer } from '../store.ts';
 import GoalPanel from './GoalPanel.vue';
 import ReferenceDialog from './ReferenceDialog.vue';
@@ -40,22 +40,15 @@ const models = computed(() => {
   return list;
 });
 const model = computed(() => catalog.value?.models.find(m => m.model === desired.value?.model));
-const description = (s: Settings) => `${s.model} · ${s.effort || '默认强度'} · ${s.mode === 'plan' ? 'Plan' : '普通'}`;
-const settingsState = computed(() => {
-  if (!current.value) return '请先选择项目';
-  if (loading.value) return '正在加载此项目的模型、模式和 Skills…';
-  const errors = Object.values(catalog.value?.errors || {}).map(e => '配置加载失败：' + e).join('；');
-  const effective = current.value.settings;
-  const reviewer=current.value.approvalsReviewer;
-  return errors || (effective ? '已生效：' + description(effective) + ' · ' + (reviewer==='auto_review'?'自动审查':reviewer==='user'?'人工审批':'审批方式待确认') + (desired.value && JSON.stringify(desired.value) !== JSON.stringify(effective) ? ' ｜下一轮：' + description(desired.value) : '') : '');
-});
+const googlePlan = computed(() => desired.value?.model.startsWith('antigravity/') && desired.value.mode === 'plan');
+const modes = computed(() => (catalog.value?.modes || []).filter(m => !model.value?.supportedModes || model.value.supportedModes.includes(m.mode)));
 const unavailable = computed(() => loading.value || !catalog.value?.models.length || !catalog.value?.modes.length);
-const sendReason = computed(() => canSend.value ? active.value ? '保留当前执行；模型设置下轮生效' : 'Enter 发送 · Shift+Enter 换行' : draft.value?.uncertain ? '提交状态尚未确认，请先核对会话' : draft.value?.readError || (store.state.authExpired ? '登录已过期，请重新打开 Viewer' : store.contextBlocked.value ? '请选择支持实验上下文管理的模型' : store.state.hydrating ? '正在同步会话' : draft.value?.uploading ? '正在上传附件' : draft.value?.sending ? '正在提交消息' : draft.value?.stopping ? '正在停止任务' : draft.value?.goalSaving ? '正在保存 Goal' : store.state.restarting || store.state.restartPending ? '正在重启后端' : '等待会话与配置准备完成'));
+const sendReason = computed(() => canSend.value ? active.value ? '保留当前执行；模型设置下轮生效' : 'Enter 发送 · Shift+Enter 换行' : draft.value?.uncertain ? '提交状态尚未确认，请先核对会话' : draft.value?.readError || (store.state.authExpired ? '登录已过期，请重新打开 Viewer' : store.contextBlocked.value ? '请选择支持实验上下文管理的模型' : store.state.hydrating ? '正在同步会话' : draft.value?.uploading ? '正在上传附件' : draft.value?.sending ? '正在提交消息' : draft.value?.stopping ? '正在停止任务' : draft.value?.goalSaving ? '正在保存 Goal' : active.value && current.value?.capabilities?.steer===false ? '当前后端不支持执行中追加，请等待完成或先停止' : store.state.restarting || store.state.restartPending ? '正在重启后端' : '等待会话与配置准备完成'));
 function change(field: 'model' | 'effort' | 'mode', event: Event) {
   if (!desired.value) return;
   const value = (event.target as HTMLSelectElement).value;
   const settings = { ...desired.value };
-  if (field === 'model') { settings.model = value; settings.effort = catalog.value?.models.find(m => m.model === value)?.defaultReasoningEffort || null; }
+  if (field === 'model') { const selected=catalog.value?.models.find(m => m.model === value);settings.model = value; settings.effort = selected?.supportedReasoningEfforts.some(e=>e.reasoningEffort===selected.defaultReasoningEffort)?selected.defaultReasoningEffort:null;if(selected?.supportedModes&&!selected.supportedModes.includes(settings.mode))settings.mode='default'; }
   else if (field === 'effort') settings.effort = value || null;
   else settings.mode = value === 'plan' ? 'plan' : 'default';
   store.setSettings(settings);
@@ -85,20 +78,19 @@ function keydown(event: KeyboardEvent) {
         <option v-if="loading" value="">{{ current ? '正在加载…' : '请先选择项目' }}</option><template v-else><option value="">默认</option><option v-for="e in model?.supportedReasoningEfforts || []" :key="e.reasoningEffort" :value="e.reasoningEffort">{{ e.reasoningEffort }}</option></template>
       </select></label>
       <label>模式 <select id="mode" aria-label="模式" :disabled="unavailable" :value="loading ? '' : desired?.mode || 'default'" :title="desired?.mode === 'plan' ? 'Plan · 规划' : '普通 · 执行'" @change="change('mode', $event)">
-        <option v-if="loading" value="">{{ current ? '正在加载…' : '请先选择项目' }}</option><option v-else-if="!catalog?.modes.length" value="">暂无可用选项</option><template v-else><option v-for="m in catalog.modes" :key="m.mode" :value="m.mode">{{ m.mode === 'plan' ? 'Plan · 规划' : '普通 · 执行' }}</option></template>
+        <option v-if="loading" value="">{{ current ? '正在加载…' : '请先选择项目' }}</option><option v-else-if="!catalog?.modes.length" value="">暂无可用选项</option><template v-else><option v-for="m in modes" :key="m.mode" :value="m.mode">{{ m.mode === 'plan' ? 'Plan · 规划' : '普通 · 执行' }}</option></template>
       </select></label>
-      <button id="skills-button" type="button" class="quiet" :disabled="loading" :title="catalog?.errors.skills || '选择与管理 Skills'" @click="emit('skills')">Skills</button>
-      <button id="goal-button" type="button" class="quiet" :disabled="loading || draft?.goalSaving || store.state.connection !== '已连接'" @click="goalPanel?.show()">Goal</button>
+      <button v-if="current?.capabilities?.skills!==false" id="skills-button" type="button" class="quiet" :disabled="loading" :title="catalog?.errors.skills || '选择与管理 Skills'" @click="emit('skills')">Skills</button>
+      <button v-if="current?.capabilities?.goals!==false" id="goal-button" type="button" class="quiet" :disabled="loading || draft?.goalSaving || store.state.connection !== '已连接'" @click="goalPanel?.show()">Goal</button>
     </div>
-    <GoalPanel ref="goalPanel" />
-    <details class="settings-details" :open="loading || !!Object.keys(catalog?.errors || {}).length"><summary id="settings-toggle">配置与审批状态</summary><div id="settings-state" class="subtle" role="status">{{ settingsState }}</div></details>
-    <div v-if="current?.contextManagement" id="context-state" class="subtle" role="status" title="此会话创建时启用，恢复时保留；模型须支持实验上下文管理">实验上下文管理 · {{ loading?'正在检查模型…':store.contextBlocked.value?'当前模型不支持或能力未确认，请选择兼容模型或重新加载配置':'已开启' }}</div>
-    <button id="controls-retry" type="button" class="quiet" :hidden="loading || !Object.keys(catalog?.errors || {}).length" @click="store.loadControls()">重新加载配置</button>
+    <p v-if="googlePlan" id="plan-mode-note" class="subtle" role="status">Plan 从下一轮发送生效：只读调查和规划，工具禁用网络；MCP、子代理和 Goal 续跑暂停。切回普通模式后可执行。</p>
+    <GoalPanel v-if="current?.capabilities?.goals!==false" ref="goalPanel" />
+    <div v-if="current?.hybrid && draft?.uncertain" class="runtime-recovery" role="alert"><p>{{ current?.runtimeError || '上次执行结果未知，未自动重发。' }}</p><button type="button" class="quiet" :disabled="loading || draft.sending" @click="store.recoverExecution().catch(store.report)">核实执行状态</button></div>
     <div id="selected-skills"><button v-for="s in draft?.skills || []" :key="s.path" type="button" class="skill-chip" @click="store.toggleSkill(s, false)">${{ s.name }} ×</button></div>
     <details v-if="draft?.queued.length" id="queued-inputs" open>
       <summary>待接收消息 · {{ draft.queued.length }}</summary>
       <div v-for="q in draft.queued" :key="q.id" class="queued-input">
-        <span class="subtle">{{ current?.turns?.some(t => t.id === q.turnId && t.status === 'inProgress') ? '已排队，等待 Codex 接收' : '接收尚未确认，内容保留在此' }}</span>
+        <span class="subtle">{{ current?.turns?.some(t => t.id === q.turnId && t.status === 'inProgress') ? '已排队，等待模型接收' : '接收尚未确认，内容保留在此' }}</span>
         <pre>{{ q.text }}</pre><span v-for="s in q.skills" :key="s.path">${{ s.name }} </span>
         <ReferenceCard v-for="r in q.references || []" :key="r.id" :reference="r" />
         <a v-for="a in q.attachments" :key="a.id" :href="'/api/attachments/' + a.id" target="_blank" rel="noopener">{{ a.name }} </a>

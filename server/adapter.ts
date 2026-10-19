@@ -3,7 +3,6 @@ import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { object, string } from '../shared/protocol.ts';
 import type { Obj } from '../shared/protocol.ts';
-import { createWireMonitor, modelCaptureLog } from './wire-monitor.ts';
 
 export class AppServer extends EventEmitter {
   child?: ChildProcessWithoutNullStreams;
@@ -17,8 +16,8 @@ export class AppServer extends EventEmitter {
     super(); this.options = privateOptions;
   }
   private options: { command?: string; args?: string[]; cwd?: string; env?: NodeJS.ProcessEnv };
-  private launchOptions: { args?: string[]; env?: NodeJS.ProcessEnv; captureModels?: boolean } = {};
-  configureLaunch(options: { args?: string[]; env?: NodeJS.ProcessEnv; captureModels?: boolean }) {
+  private launchOptions: { args?: string[]; env?: NodeJS.ProcessEnv } = {};
+  configureLaunch(options: { args?: string[]; env?: NodeJS.ProcessEnv }) {
     if (this.child) throw new Error('Configure launch before starting Codex');
     // Per-instance additions survive reconnects, but are not inherited by forked workers.
     this.launchOptions = options;
@@ -35,9 +34,8 @@ export class AppServer extends EventEmitter {
     const args = [...(this.options.args || ['app-server', '--listen', 'stdio://']), ...(this.launchOptions.args || [])];
     const env = { ...(this.options.env || process.env) };
     // Internal client credentials belong to one app-server, never incidental parent processes or forked workers.
-    for (const key of ['VIEWER_WATCHDOG_URL','VIEWER_WATCHDOG_TOKEN','VIEWER_VAULT_LOG_URL','VIEWER_VAULT_LOG_TOKEN','VIEWER_REFERENCES_URL','VIEWER_REFERENCES_TOKEN']) delete env[key];
+    for (const key of ['VIEWER_WATCHDOG_URL','VIEWER_WATCHDOG_TOKEN','VIEWER_VAULT_LOG_URL','VIEWER_VAULT_LOG_TOKEN','VIEWER_REFERENCES_URL','VIEWER_REFERENCES_TOKEN','VIEWER_AGENTS_URL','VIEWER_AGENTS_TOKEN']) delete env[key];
     Object.assign(env,this.launchOptions.env);
-    if (this.launchOptions.captureModels) { env.RUST_LOG = `${env.RUST_LOG || 'error'},${modelCaptureLog}`; env.NO_COLOR = '1'; }
     const child = spawn(this.options.command || 'codex', args, {
       cwd: this.options.cwd, env, stdio: ['pipe', 'pipe', 'pipe'], shell: false,
     });
@@ -53,12 +51,8 @@ export class AppServer extends EventEmitter {
         if (line.trim()) this.receive(line);
       }
     });
-    // Raw stderr is never persisted or forwarded. Only allowlisted, ID-joined model metadata leaves the parser.
-    if (this.launchOptions.captureModels) {
-      const consume = createWireMonitor(n => { if (this.child === child) this.emit('notice', n); });
-      child.stderr.setEncoding('utf8');
-      child.stderr.on('data', (chunk: string) => { if (this.child === child) consume(chunk); });
-    } else child.stderr.resume();
+    // Drain diagnostics without persisting or forwarding native stderr.
+    child.stderr.resume();
     child.stdin.on('error', () => {});
     const failed = (error: Error) => {
       if (this.child !== child) return;
@@ -68,7 +62,7 @@ export class AppServer extends EventEmitter {
     };
     child.once('error', failed);
     child.once('exit', () => failed(new Error('Codex process exited; previous actions will not be replayed')));
-    await this.raw('initialize', { clientInfo: { name: 'codex_viewer', title: 'Codex Viewer', version: '0.2.0' }, capabilities: { experimentalApi: true, extensions: { 'io.modelcontextprotocol/ui': { mimeTypes: ['text/html;profile=mcp-app'] } } } });
+    await this.raw('initialize', { clientInfo: { name: 'codex_viewer', title: 'Codex Viewer', version: '0.2.0' }, capabilities: { experimentalApi: true } });
     this.send({ method: 'initialized' });
     this.emit('online');
   }
@@ -102,7 +96,7 @@ export class AppServer extends EventEmitter {
   async call(method: string, params: Obj = {}): Promise<Obj> { await this.start(); return this.raw(method, params); }
   respond(id: unknown, result: Obj) { this.send({ id, result }); }
   unsupported(id: unknown) { this.send({ id, error: { code: -32601, message: 'This client does not support this request' } }); }
-  fork() { return new AppServer(this.options); }
+  fork(_runtime?: 'codex' | 'antigravity') { return new AppServer(this.options); }
   restart(): Promise<void> {
     if (this.closed) return Promise.reject(new Error('App Server stopped'));
     if (this.restarting) return this.restarting;

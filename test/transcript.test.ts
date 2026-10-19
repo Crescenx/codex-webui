@@ -17,7 +17,6 @@ test('trace defaults follow actual replies, preserve manual choices and retain e
   all = project(); visible = traceRows(all, reading);
   assert.equal(all[1]!.trace!.active, false);
   assert.deepEqual(visible.map(r => r.key), ['user', 'trace:r', 'reply']);
-  assert.deepEqual(traceRows(all, reading, '', new Set(['tool'])).map(r => r.key), ['user', 'trace:r', 'tool', 'reply']);
   assert.equal(traceRows(all, reading, 'trace:r').length, 5);
   assert.deepEqual(all.map(r => r.original), native.map(r => r.original));
   itemView(reading, 'trace:r').open = true;
@@ -26,8 +25,8 @@ test('trace defaults follow actual replies, preserve manual choices and retain e
   all = project(); assert.equal(all.at(-1)!.trace!.active, true);
   for (const r of native) r.turn.status = 'completed';
   assert.equal(traceRows(project(), reading).at(-1)!.traceOpen, false);
-  const app = row('app', 'mcpToolCall'); app.original.appContext = { resourceUri: 'ui://result' };
-  assert.equal(groupTraces([app])[0]!.trace, undefined);
+  const tool = row('mcp', 'mcpToolCall'); tool.original.appContext = { resourceUri: 'ui://legacy-result' };
+  assert.equal(groupTraces([tool])[0]!.trace!.count, 1);
   const long = groupTraces(Array.from({ length: 1000 }, (_, i) => ({ ...row(String(i), 'reasoning'), turn: { id: 'done', status: 'completed', items: [] } })));
   assert.equal(traceRows(long, reading).length, 1); assert.equal(long[0]!.trace!.count, 1000);
 });

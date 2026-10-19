@@ -66,6 +66,10 @@ test('local images use the owning thread and preserve source without loading rem
 });
 test('local links decode URI paths once, preserve source and reject encoded protocols', () => {
   for (const [href, target] of [
+    ['file:///mnt/d/Documents/paper%20%E4%B8%AD%E6%96%87.pdf','/mnt/d/Documents/paper 中文.pdf'],
+    ['file:///D:/Documents/paper.pdf','/mnt/d/Documents/paper.pdf'],
+    ['file://localhost/mnt/d/paper.pdf','/mnt/d/paper.pdf'],
+    ['file:///mnt/d/record%2520.pdf','/mnt/d/record%20.pdf'],
     ['文档/中文 空格.md:2:3', '文档/中文 空格.md:2:3'],
     [encodeURI('/项目/中文 文件.md#L3'), '/项目/中文 文件.md#L3'],
     ['文档/记录%2520.md:2', '文档/记录%20.md:2'],
@@ -76,7 +80,7 @@ test('local links decode URI paths once, preserve source and reject encoded prot
     assert.ok(rendered.html.includes(' · ' + target.split('/').at(-1)));
     assert.ok([...rendered.atoms.values()].includes(source));
   }
-  for (const href of ['javascript%3Aalert', '%6aavascript:alert', '%2F%2Fexample.com/file', '%E6%A0.md', '文档/%00.md']) {
+  for (const href of ['file://remote/share/paper.pdf','file:///mnt/d/%00.pdf','javascript%3Aalert', '%6aavascript:alert', '%2F%2Fexample.com/file', '%E6%A0.md', '文档/%00.md']) {
     assert.doesNotMatch(renderMarkdown(`[文件](<${href}>)`).html, /data-file=|data-external=|href=/);
   }
   const external = 'https://example.com/%E4%B8%AD%E6%96%87?q=%2520';

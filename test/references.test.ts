@@ -78,7 +78,7 @@ test('HTTP and MCP references work with legacy turns, native identity, revoked g
     const http=async(p:string,b?:unknown)=>{const r=await fetch(app.origin+'/api'+p,{method:b===undefined?'GET':'POST',headers:{Cookie:cookie,Origin:app.origin,'Content-Type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)});const v=await r.json();if(!r.ok)throw new Error(v.error);return v;};
     const idle=async(id:string)=>{for(let i=0;i<100;i++){if((await http(`/threads/${id}?refresh=1`)).thread.status.type==='idle')return;await delay(20);}throw new Error('fixture did not finish');};
     const a=(await http('/threads',{cwd:dir})).thread.id,b=(await http('/threads',{cwd:dir})).thread.id;
-    await adapter.call('mock/mcpApp',{threadId:a,turnId:'source-turn',items:source().turns![0].items});
+    await adapter.call('mock/turn',{threadId:a,turnId:'source-turn',items:source().turns![0].items});
     const capabilities=await http('/controls?threadId='+b);assert.equal(capabilities.capabilities.references.session,true);
     await http(`/threads/${b}/turns`,{text:'legacy message',attachments:[]});await idle(b);
     const {reference}=await http(`/threads/${b}/references`,{kind:'session',sourceThreadId:a});
@@ -104,7 +104,7 @@ test('reference queues validate the entire batch before interrupting and preserv
     const request=(p:string,b?:unknown)=>fetch(app.origin+'/api'+p,{method:b===undefined?'GET':'POST',headers,body:b===undefined?undefined:JSON.stringify(b)});
     const http=async(p:string,b?:unknown)=>{const r=await request(p,b),v=await r.json();assert.equal(r.status,200,v.error);return v;};
     const a=(await http('/threads',{cwd:dir})).thread.id,b=(await http('/threads',{cwd:dir})).thread.id,route=`/threads/${b}`;
-    await adapter.call('mock/mcpApp',{threadId:a,turnId:'source',items:[{id:'large',type:'agentMessage',text:'a'.repeat(33000)},{id:'small',type:'agentMessage',text:'small record'}]});
+    await adapter.call('mock/turn',{threadId:a,turnId:'source',items:[{id:'large',type:'agentMessage',text:'a'.repeat(33000)},{id:'small',type:'agentMessage',text:'small record'}]});
     const create=async(itemId:string)=>(await http(route+'/references',{kind:'snapshot',sourceThreadId:a,selected:[{turnId:'source',itemId}]})).reference;
     const large=await create('large'),another=await create('large'),small=await create('small');
     const {turn}=await http(route+'/turns',{text:'hold-tool',attachments:[]});

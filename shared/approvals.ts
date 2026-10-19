@@ -1,8 +1,24 @@
 import type { Obj, PendingRequest } from './protocol.ts';
-import { elicitationFields, externalUrl } from './mcp-apps.ts';
+
+const record = (value: unknown): Obj => value && typeof value === 'object' && !Array.isArray(value) ? value as Obj : {};
+export function elicitationFields(params: Obj) {
+  if (params.mode !== 'form') return null;
+  const schema = record(params.requestedSchema), fields = Object.entries(record(schema.properties));
+  if (schema.type !== 'object' || fields.length > 64 || fields.some(([, raw]) => !['string', 'number', 'integer', 'boolean', 'array'].includes(String(record(raw).type)))) return null;
+  return fields.map(([name, raw]) => {
+    const field = record(raw), options = field.type === 'array' ? record(field.items) : field;
+    const choices = Array.isArray(options.enum) ? options.enum.map((value, i) => ({ value: String(value), title: String((options.enumNames as unknown[] | undefined)?.[i] ?? value) }))
+      : Array.isArray(options.oneOf) ? options.oneOf.map(raw => ({ value: String(record(raw).const), title: String(record(raw).title ?? record(raw).const) })) : [];
+    return { name, type: String(field.type), title: String(field.title || name), description: String(field.description || ''), choices, default: field.default };
+  });
+}
+export function externalUrl(value: unknown): string | undefined {
+  try { const url = new URL(String(value)); return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password ? url.href : undefined; } catch { return undefined; }
+}
 
 export type ApprovalChoice = { id: string; label: string; description?: string; detail?: string; result: Obj };
 export function approvalChoices(request: Pick<PendingRequest, 'method' | 'params' | 'windows'>): ApprovalChoice[] {
+
   if (request.method === 'mcpServer/elicitation/request') {
     const supported = request.params.mode === 'url' ? !!externalUrl(request.params.url) : !!elicitationFields(request.params);
     return (supported ? ['accept', 'decline', 'cancel'] : ['decline', 'cancel']).map(id => ({ id, label: id === 'accept' ? '提交' : id === 'decline' ? '拒绝' : '取消', result: { action: id, content: null, _meta: null } }));
@@ -11,7 +27,7 @@ export function approvalChoices(request: Pick<PendingRequest, 'method' | 'params
   const permissions = request.method === 'item/permissions/requestApproval';
   const question = request.method === 'item/tool/requestUserInput';
   if (!command && !permissions && !question && request.method !== 'item/fileChange/requestApproval') return [];
-  const offered = command && Array.isArray(p.availableDecisions) ? p.availableDecisions : null;
+  const offered = (command || request.method === 'item/fileChange/requestApproval') && Array.isArray(p.availableDecisions) ? p.availableDecisions : null;
   const choices: ApprovalChoice[] = [];
   const add = (id: string, label: string, decision: string | Obj, description?: string, detail?: string) => {
     if (offered && !offered.some(d => JSON.stringify(d) === JSON.stringify(decision))) return;
@@ -23,7 +39,7 @@ export function approvalChoices(request: Pick<PendingRequest, 'method' | 'params
   add('accept', question ? '提交回答' : permissions ? '本轮允许' : request.windows ? '允许本次 Windows 操作' : '单次允许', 'accept');
   if (!question) add('acceptForSession', '本会话允许', 'acceptForSession', permissions
     ? '本次列出的权限可用于当前会话的后续轮次。'
-    : command ? '由 Codex 在当前会话内记住匹配的审批；其他命令仍可能询问。' : '当前会话内，对相同文件的后续修改不再询问。');
+    : p.approvalScope==='identicalToolArguments' ? '此会话内仅记住工具名称和完全相同的参数；参数或权限范围改变后会再次询问。' : command ? '由 Codex 在当前会话内记住匹配的审批；其他命令仍可能询问。' : '当前会话内，对相同文件的后续修改不再询问。');
   const prefix = p.proposedExecpolicyAmendment;
   if (command && Array.isArray(prefix) && prefix.length && prefix.every(v => typeof v === 'string' && v.length)) {
     const shellScript=prefix.length>=3 && /(?:^|\/)(?:ba|z|da|k)?sh$/.test(prefix[0]) && /^-[a-z]*c[a-z]*$/.test(prefix[1]);

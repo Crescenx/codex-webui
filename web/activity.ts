@@ -11,6 +11,7 @@ export function activityState(item:Item,turn:Turn) {
 }
 export function activity(item:Item,turn:Turn) {
   const state = activityState(item, turn);
+
   const action=item.action as {type?:string;query?:string;queries?:string[];url?:string}|undefined;
   const title=item.type==='reasoning'?(state==='running'?'思考中':'思考'):
     item.type==='webSearch'?(action?.type==='openPage'?'打开网页：'+(action.url||''):'搜索：'+(item.query||action?.query||action?.queries?.join('、')||'网页')):
@@ -23,7 +24,9 @@ export function activity(item:Item,turn:Turn) {
     item.type==='collabAgentToolCall'?[item.prompt, Array.isArray(item.receiverThreadIds) ? item.receiverThreadIds.join('、') : '', '调用状态不代表子代理执行状态，请查看右侧面板。'].filter(Boolean).join('\n\n'):
     item.type==='fileChange'?'':JSON.stringify(item.result||item.error||item.changes||'',null,2);
   if(detail==='""')detail='';
+  const resultSummary = item.result && typeof item.result === 'object' ? (item.result as {summary?:unknown}).summary : undefined;
+  const toolSummary = typeof resultSummary === 'string' ? resultSummary.trim() : '';
   const [label,subject]=item.type==='commandExecution'?['命令',String(item.command||'')]:
-    item.type==='webSearch'?[action?.type==='openPage'?'网页':'搜索',String(item.query||action?.query||action?.queries?.join('、')||action?.url||'网页')]:[String(title),''];
+    item.type==='webSearch'?[action?.type==='openPage'?'网页':'搜索',String(item.query||action?.query||action?.queries?.join('、')||action?.url||'网页')]:[String(title),toolSummary];
   return {state,title:String(title),label,subject,detail};
 }

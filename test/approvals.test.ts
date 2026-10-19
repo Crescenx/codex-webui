@@ -3,12 +3,21 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { approvalChoices } from '../shared/approvals.ts';
+import { approvalChoices, elicitationFields } from '../shared/approvals.ts';
+import { elicitationResponse } from '../server/approvals.ts';
 import type { Obj, PendingRequest } from '../shared/protocol.ts';
 import { AppServer } from '../server/adapter.ts';
 import { serve } from '../server/main.ts';
 
 const request = (params: Obj = {}, method = 'item/commandExecution/requestApproval'): PendingRequest => ({ id: 'request', method, params, windows: false });
+test('native MCP prompts retain schema validation and safe URL choices', () => {
+  const params = { mode: 'form', requestedSchema: { type: 'object', properties: { count: { type: 'integer', minimum: 1 } }, required: ['count'], additionalProperties: false } };
+  assert.equal(elicitationFields(params)?.[0].name, 'count');
+  assert.deepEqual(elicitationResponse(params, 'accept', { count: 2 }), { action: 'accept', content: { count: 2 }, _meta: null });
+  for (const answers of [{}, { count: 0 }, { count: '2' }, { count: 2, extra: true }]) assert.throws(() => elicitationResponse(params, 'accept', answers), /请检查表单/);
+  assert.deepEqual(elicitationResponse(params, 'decline', {}), { action: 'decline', content: null, _meta: null });
+  assert.deepEqual(approvalChoices(request({ mode: 'url', url: 'javascript:alert(1)' }, 'mcpServer/elicitation/request')).map(c => c.id), ['decline', 'cancel']);
+});
 test('approval choices preserve offered scopes, exact rules and permission subsets', () => {
   assert.ok(approvalChoices(request()).some(c => c.id === 'acceptForSession'));
   assert.deepEqual(approvalChoices(request({ availableDecisions: ['decline', 'cancel'], proposedExecpolicyAmendment: ['ssh'] })).map(c => c.id), ['decline', 'cancel']);

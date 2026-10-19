@@ -38,8 +38,9 @@ export function agentTree(root: Thread, threads: Thread[], waiting: Set<string> 
         else if (t?.status?.type === 'idle' && (!reported || state === 'running' || state === 'pendingInit')) state = 'idle';
         else if (t?.status?.type === 'notLoaded' && state === 'running') state = 'unknown';
       }
+      if (t?.agentState && state !== 'waiting') state = t.agentState;
       const answer = t?.turns?.flatMap(v => v.items).findLast(i => i.type === 'agentMessage' && i.text)?.text;
-      result.push({ id, parentId, depth, name: t?.agentNickname || t?.name || t?.agentRole || id, task: tasks.get(id) || t?.preview || '', summary: answer || reported?.message || '', state, label: labels[state] || labels.unknown! });
+      result.push({ id, parentId, depth, name: t?.agentNickname || t?.name || t?.agentRole || id, task: t?.hybrid?.agent?.task || tasks.get(id) || t?.preview || '', summary: answer || reported?.message || '', state, label: labels[state] || labels.unknown! });
       append(id, depth + 1);
     }
   }

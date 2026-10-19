@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { viewerDocument, viewerWindow, viewerRoot, isElement, isHTMLElement } from '../environment.ts';
 
-import { computed, defineAsyncComponent, inject, nextTick, onBeforeUnmount, onMounted, provide, ref, shallowRef, toRaw, watch } from 'vue';
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, provide, ref, shallowRef, toRaw, watch } from 'vue';
 import { defaultRangeExtractor, useVirtualizer } from '@tanstack/vue-virtual';
 import type { DeepReadonly } from 'vue';
 import type { Item, Thread } from '../../shared/protocol.ts';
+import { runtimeName } from '../../shared/runtime.ts';
 import { useViewer } from '../store.ts';
 import { installCopy } from '../render.ts';
 import { installLinks } from '../links.ts';
@@ -17,7 +18,6 @@ import QuestionCard from './QuestionCard.vue';
 import ReferenceDialog from './ReferenceDialog.vue';
 import ReferenceCard from './ReferenceCard.vue';
 import { referenceCategory, referenceSelectable } from '../../shared/references.ts';
-const McpAppBlock = defineAsyncComponent(() => import('./McpAppBlock.vue'));
 const emit = defineEmits<{ new: []; find: [] }>();
 const props = defineProps<{ thread?: DeepReadonly<Thread>; readonly?: boolean; searchInSidebar?:boolean }>();
 const store = useViewer(), current = computed(() => props.readonly ? props.thread : store.current.value);
@@ -39,16 +39,13 @@ function project(): TranscriptRow[] {
   return groupTraces(groupReasoning((toRaw(current.value)?.turns || []).flatMap(turn => turn.items.map(item => ({ key: `${threadId.value}:${turn.id}:${item.id}`, original: toRaw(item) as Item, turn: { id: turn.id, status: turn.status, items: [] } })))));
 }
 const conversation = ref<HTMLElement>(), allRows = shallowRef(project()), heldTrace = ref('');
-const openApps = ref(new Set<string>());
-const rows = computed(() => traceRows(allRows.value, reading, heldTrace.value, openApps.value));
+const rows = computed(() => traceRows(allRows.value, reading, heldTrace.value));
 const mermaid = createMermaidRenderer(() => conversation.value); provide(mermaidKey, mermaid);
 const focusKey = ref(''), selectionRange = shallowRef<[number, number] | null>(null);
-// ponytail: explicitly opened apps stay mounted; close unused apps to release their memory.
-function retainApp(key: string, open: boolean) { if (open) openApps.value.add(key); else openApps.value.delete(key); }
 const estimate = (index: number) => ['agentMessage', 'plan'].includes(rows.value[index]?.original.type || '') ? 320 : rows.value[index]?.original.type === 'userMessage' ? 100 : 65;
 const initialOffset = reading.follow ? rows.value.reduce((n, _, i) => n + estimate(i), 0) : reading.offset;
 const virtualizer = useVirtualizer(computed(() => {
-  const list = rows.value, focused = list.findIndex(row => row.key === focusKey.value), held = selectionRange.value, pinned = [...openApps.value];
+  const list = rows.value, focused = list.findIndex(row => row.key === focusKey.value), held = selectionRange.value;
   return { count: list.length, getScrollElement: () => conversation.value || null, estimateSize: estimate, getItemKey: (index: number) => list[index]!.key,
     anchorTo: follow.value ? 'end' as const : 'start' as const, scrollEndThreshold: 100,
     overscan: 4, paddingStart: props.readonly ? 16 : 40, paddingEnd: props.readonly ? 16 : 40,
@@ -56,7 +53,6 @@ const virtualizer = useVirtualizer(computed(() => {
     rangeExtractor: (range: Parameters<typeof defaultRangeExtractor>[0]) => {
       const indices = new Set(defaultRangeExtractor(range));
       if (focused >= 0) indices.add(focused);
-      for (const key of pinned) { const index = list.findIndex(row => row.key === key); if (index >= 0) indices.add(index); }
       if (held) for (let i = held[0]; i <= held[1] && i < list.length; i++) indices.add(i);
       return [...indices].sort((a, b) => a - b);
     },
@@ -72,7 +68,7 @@ const visible = computed(() => {
     let cached = snapshots.get(row.key);
     if (cached?.original !== row.original) { cached = { original: row.original, item: JSON.parse(JSON.stringify(row.original)) as Item }; snapshots.set(row.key, cached); }
     const item = cached!.item;
-    return [{ ...row, item, source: messageSource(item), message: ['agentMessage', 'userMessage', 'plan'].includes(item.type), virtual: v, view: itemView(reading, row.key) }];
+    return [{ ...row, item, source: messageSource(item), message: ['agentMessage', 'userMessage', 'plan', 'handoff'].includes(item.type), virtual: v, view: itemView(reading, row.key) }];
   });
 });
 let frame = 0, layoutFrame = 0, disposed = false, restoring = true, jumpedTo = '', lastOffset = 0;
@@ -244,11 +240,10 @@ defineExpose({openSearch});
         </button>
         <article v-else class="message" :data-turn-id="row.turn.id" :class="[row.item.type === 'userMessage' ? 'user' : row.message ? 'assistant' : 'tool', { 'trace-item': row.trace, 'reasoning-continues': row.reasoning && row.reasoning.lastKey !== row.key, 'target-turn': row.turn.id === targetTurn, 'search-hit': hits[hitIndex]?.key === row.key }]">
           <label v-if="selecting && referenceCategory(row.item)" class="record-select" data-copy-ignore><input type="checkbox" :checked="selectedRecords.has(row.key)" :disabled="!referenceSelectable(row.item,row.turn)" @change="toggleRecord(row)"> {{ referenceCategory(row.item)==='tool'?'选择此工具记录':'选择此消息' }}<span v-if="!referenceSelectable(row.item,row.turn)">（仍在生成）</span></label>
-          <div class="message-header" data-copy-ignore :hidden="!row.message"><span v-if="row.message">{{ row.item.type === 'userMessage' ? (readonly ? '任务输入' : '你') : row.item.type === 'plan' ? 'Codex · Plan' : 'Codex' }}</span><button v-if="row.item.type === 'agentMessage' || row.item.type === 'plan'" type="button" class="quiet" @click="copy(row.source)">复制 Markdown</button></div>
+          <div class="message-header" data-copy-ignore :hidden="!row.message"><span v-if="row.message">{{ row.item.type === 'userMessage' ? (readonly ? '任务输入' : '你') : row.item.type === 'handoff' ? '接手记录' : runtimeName((row.item.source || current || {}) as {runtimeId?: 'codex'}) + (row.item.type === 'plan' ? ' · Plan' : '') }}</span><button v-if="row.item.type === 'agentMessage' || row.item.type === 'plan'" type="button" class="quiet" @click="copy(row.source)">复制 Markdown</button></div>
           <QuestionCard v-if="!readonly && row.item.type === 'agentMessage' && row.item.delivery === 'async' && row.item.questions?.length" :item="row.item" :turn="row.turn" />
           <MessageBody v-else-if="row.message" :source="referenceMessage(row.item)?.text ?? row.source" :markdown="row.item.type !== 'userMessage'" :thread-id="threadId" :item-key="row.key" :complete="row.turn.status !== 'inProgress'" @copy="copy" @layout="layout" />
           <ReasoningBlock v-else-if="row.reasoning" :item="row.item" :turn="row.turn" :group="row.reasoning" :thread-id="threadId" :item-key="row.key" @copy="copy" @layout="layout" />
-          <McpAppBlock v-else-if="row.item.type === 'mcpToolCall'" :item="row.item" :turn="row.turn" :thread-id="threadId" :cwd="current?.cwd" :view="row.view" :readonly="readonly" @copy="copy" @active="retainApp(row.key, $event)" @layout="layout" />
           <ActivityBlock v-else :item="row.item" :turn="row.turn" :cwd="current?.cwd" :view="row.view" @copy="copy" />
           <ReferenceCard v-for="r in messageReferences(row.item)" :key="r.id" :reference="r" @toggle="layout" />
         </article>

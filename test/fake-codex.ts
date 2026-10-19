@@ -32,6 +32,9 @@ createInterface({ input: process.stdin }).on('line', line => {
   if (m.method === 'initialize') return reply({});
   if (m.method === 'account/read') return reply({ account: { type:'chatgpt', planType:'pro' } });
   if (m.method === 'config/read') return reply({ config: { model:'mock', model_provider:'openai', approvals_reviewer:'auto_review' } });
+  if(m.method==='mock/agents'){
+    void fetch(process.env.VIEWER_AGENTS_URL!,{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+process.env.VIEWER_AGENTS_TOKEN},body:JSON.stringify({name:p.name,arguments:p.arguments,_meta:p.noIdentity?{}:{threadId:p.threadId}})}).then(async r=>{const data=await r.json();if(r.ok)reply(data);else send({id:m.id,error:{message:data.error}});});return;
+  }
   if (m.method === 'mcpServerStatus/list')return reply({data:process.env.VIEWER_FAKE_NO_REFERENCES?[]:[{name:'viewer_references',tools:Object.fromEntries(referenceTools.map(t=>[t.name,t]))}],nextCursor:null});
   if ((m.method==='mcpServer/tool/call' && p.server==='viewer_references') || m.method==='mock/references') {
     void fetch(process.env.VIEWER_REFERENCES_URL!,{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${process.env.VIEWER_REFERENCES_TOKEN}`},body:JSON.stringify({name:p.tool || p.name,arguments:p.arguments,_meta:p.noIdentity?{}:{threadId:p.threadId}})}).then(async r=>{const value=await r.json();if(m.method==='mock/references'){if(r.ok)reply(value);else send({id:m.id,error:{message:value.error}});}else reply({isError:!r.ok,content:[{type:'text',text:JSON.stringify(value)}]});});return;
@@ -56,6 +59,7 @@ createInterface({ input: process.stdin }).on('line', line => {
     t.approvalsReviewer=p.approvalsReviewer||'user';threads.set(t.id, t);if(p.ephemeral)ephemeral.add(t.id); return reply({ thread: t,model:t.settings!.model,reasoningEffort:'medium',approvalsReviewer:t.approvalsReviewer });
   }
   const t = threads.get(p.threadId);
+  if (m.method === 'thread/inject_items' && t) { (t as unknown as Obj).injectedContext=p.items;return reply({}); }
   if (m.method === 'thread/goal/get') return reply({ goal: t?.goal || null });
   if (m.method === 'thread/goal/clear' && t) { const cleared = !!t.goal; t.goal = null; notice('thread/goal/cleared', { threadId: t.id }); return reply({ cleared }); }
   if (['thread/goal/set', 'mock/goal'].includes(m.method) && t) {
@@ -77,8 +81,8 @@ createInterface({ input: process.stdin }).on('line', line => {
     if (turn) { turn.status = 'completed'; t.status = { type: 'idle' }; notice('turn/completed', { threadId: t.id, turn }); }
     return reply({});
   }
-  if (m.method === 'mock/mcpApp' && t) {
-    const turn: Turn = { id: p.turnId || 'app-turn-' + ++next, status: p.status || 'completed', items: p.items || [{ id: p.itemId || 'app-item', type: 'mcpToolCall', server: 'fixture', tool: 'show', arguments: { initial: true }, status: 'completed', result: { content: [{ type: 'text', text: 'original result' }], structuredContent: { value: 1 }, _meta: { private: 'original metadata' } } }] };
+  if (m.method === 'mock/turn' && t) {
+    const turn: Turn = { id: p.turnId || 'mock-turn-' + ++next, status: p.status || 'completed', items: p.items || [] };
     t.turns ??= []; t.turns.push(turn); notice('turn/completed', { threadId: t.id, turn }); return reply({ turn });
   }
   if (m.method === 'mock/fileChange' && t) {
@@ -144,6 +148,7 @@ createInterface({ input: process.stdin }).on('line', line => {
     if(m.method==='thread/settings/update')notice('thread/settings/updated',{threadId:t.id,threadSettings});
     return reply(m.method==='thread/settings/update'?{}:{status:'applied'});
   }
+  if(m.method==='thread/unload')return reply({});
   if(m.method==='thread/name/set' && t){t.name=p.name;notice('thread/name/updated',{threadId:t.id,threadName:t.name});return reply({});}
   if (m.method === 'thread/read' || m.method === 'thread/resume') {
     // Like native loaded threads, resume returns existing settings; updates use their own RPC.

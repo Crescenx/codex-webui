@@ -1,13 +1,4 @@
 /* Typography & Color System */
-/* Keep retained iframe hit regions clipped to their app while virtual rows move. */
-.mcp-app { contain: paint; margin-top: 8px; padding: 12px; border: 1px solid var(--border-medium); border-radius: 8px; background: var(--bg-surface); }
-.mcp-app-toolbar { display: flex; gap: 12px; align-items: center; }
-.mcp-app-toolbar > strong { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-.mcp-app > iframe { display: block; width: 100%; border: 0; margin-top: 12px; background: var(--bg-surface); }
-.mcp-app > a { display: block; overflow-wrap: anywhere; }
-.mcp-message-dialog { width: 640px; max-height: 85vh; overflow: auto; }
-.mcp-message-dialog textarea { display: block; width: 100%; margin: 12px 0; resize: vertical; }
-.mcp-message-dialog .mcp-app-toolbar { justify-content: flex-end; }
 :root {
   /* Fonts: Windows-optimized Chinese/English stack */
   --font-sans: "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, -apple-system, "Noto Sans CJK SC", "Source Han Sans SC", "Droid Sans Fallback", sans-serif;
@@ -1029,7 +1020,7 @@ summary:hover {
   line-height: 1.6;
 }
 
-.usage-bar { display: flex; align-items: center; justify-content: center; gap: 16px; color: var(--text-secondary); font-size: 12px; }
+.usage-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 4px 16px; color: var(--text-secondary); font-size: 12px; }
 .usage-bar > span { white-space: nowrap; }
 .usage-bar b { font-weight: 500; font-variant-numeric: tabular-nums; }
 .usage-bar > button { padding: 2px 6px; font-size: inherit; }
@@ -1565,11 +1556,16 @@ textarea:focus-visible, select:focus-visible, summary:focus-visible,
 .sidebar-more > div { position: absolute; bottom: 42px; left: 0; right: 0; display: grid; padding: 8px; border: 1px solid var(--border-medium); background: var(--bg-elevated); border-radius: 8px; z-index: 5; box-shadow: var(--shadow-md); }
 .sidebar-more button { text-align: left; }
 .project-more { text-align: left; padding: 3px 8px; color: var(--text-secondary); }
-.settings-details { font-size: 12px; padding: 0 16px; margin: 4px 0; }
-.settings-details summary { cursor: pointer; color: var(--text-secondary); }
-.settings-details #settings-state { padding: 6px 0; }
+.session-info { position: relative; font-size: 12px; }
+.session-info > summary { cursor: pointer; color: var(--text-secondary); padding: 6px 10px; border-radius: 6px; }
+.session-info[open] > summary { background: var(--bg-active); color: var(--accent-primary); }
+.session-info-panel { position: absolute; top: calc(100% + 8px); right: 0; z-index: 30; width: 420px; padding: 12px 16px; background: var(--bg-elevated); border: 1px solid var(--border-medium); border-radius: 10px; box-shadow: 0 8px 24px #0004; }
+.session-info-panel :is(#settings-state, #context-state) { padding: 6px 0; }
+.agent-controls { overflow-wrap: anywhere; }
+.agent-controls label { display: grid; gap: 6px; margin-block: 10px; }
+.agent-controls textarea { width: 100%; box-sizing: border-box; resize: vertical; }
 #selected-skills, #attachments, #queued-inputs, #goal-state { flex-shrink: 1; min-height: 0; overflow: auto; }
-.controls, .composer-actions, .settings-details { flex-shrink: 0; }
+.controls, .composer-actions { flex-shrink: 0; }
 .prompt-area { position: relative; flex: 0 1 auto; min-height: 40px; }
 #prompt { min-height: 40px; }
 .composer-actions { margin-top: 0; padding-bottom: 8px; }
@@ -1623,3 +1619,5 @@ dialog.workspace-dialog[open], #skills-dialog[open] { display: flex; flex-direct
 #sidebar-conversation-search .conversation-search input{width:100%;flex-basis:100%;min-width:0}
 #sidebar-conversation-search .search-excerpt{width:100%;font-size:12px}
 .conversation-search-portal{display:contents}
+.runtime-status { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin-block:6px; }
+.runtime-recovery { padding:8px 12px; border:1px solid var(--border); border-radius:6px; }

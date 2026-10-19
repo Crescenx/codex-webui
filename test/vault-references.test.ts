@@ -19,8 +19,8 @@ test('plugin and browser share cross-project references; native reads retain tar
     const req=(p:string,body?:unknown,plugin=true)=>fetch(app.origin+'/api'+p,{method:body===undefined?'GET':'POST',headers:{'Content-Type':'application/json',...(plugin?{Authorization:'Bearer '+token}:{Cookie:cookie,Origin:app.origin})},body:body===undefined?undefined:JSON.stringify(body)});
     const create=async(cwd:string,plugin=true)=>(await(await req('/threads',{cwd},plugin)).json()).thread.id;
     const source=await create(a),target=await create(a),outside=await create(b,false);
-    await adapter.call('mock/mcpApp',{threadId:source,turnId:'src',items:[{id:'message',type:'agentMessage',text:'same-vault record'}]});
-    await adapter.call('mock/mcpApp',{threadId:outside,turnId:'src',items:[{id:'message',type:'agentMessage',text:'other-vault private'}]});
+    await adapter.call('mock/turn',{threadId:source,turnId:'src',items:[{id:'message',type:'agentMessage',text:'same-vault record'}]});
+    await adapter.call('mock/turn',{threadId:outside,turnId:'src',items:[{id:'message',type:'agentMessage',text:'other-vault private'}]});
     const route=`/threads/${target}/references`;
     const snapshot=await req(route,{kind:'snapshot',sourceThreadId:outside,selected:[{turnId:'src',itemId:'message'}]});assert.equal(snapshot.status,200);assert.match(JSON.stringify(await snapshot.json()),/other-vault private/);
     assert.equal((await req(route,{kind:'session',sourceThreadId:outside})).status,200);

@@ -14,6 +14,15 @@ test('composer can shrink and grow by dragging at desktop zoom levels', async ({
     const { thread } = await (await page.request.post(app.origin + '/api/threads', { headers: { origin: app.origin }, data: { cwd: dir } })).json();
     await page.goto(app.origin + '/#' + thread.id);
     await expect(page.locator('#send')).toBeEnabled();
+    await expect(page.locator('#composer .runtime-status, #composer #settings-state, #composer #context-state')).toHaveCount(0);
+    const composerBefore=await page.locator('#composer').boundingBox();
+    await page.locator('#settings-toggle').click();
+    await expect(page.locator('.session-info-panel')).toBeVisible();
+    expect(await page.locator('#composer').boundingBox()).toEqual(composerBefore);
+    await page.screenshot({path:'test-results/session-info-desktop.png'});
+    await page.keyboard.press('Escape');
+    await expect(page.locator('.session-info-panel')).toBeHidden();
+    await expect(page.locator('#settings-toggle')).toBeFocused();
     const prompt = page.locator('#prompt');
     for (const zoom of [1, 1.5, 2]) {
       // Browser zoom reduces the available CSS viewport on the same desktop screen.

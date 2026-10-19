@@ -16,7 +16,7 @@ test('Obsidian and web share references with folder-scoped selection and new tar
   await page.setViewportSize({width:1600,height:1000});await page.goto(app.launchUrl);
   const create=async(cwd:string,name:string)=>{const r=await page.request.post(app.origin+'/api/threads',{headers:{origin:app.origin},data:{cwd}});const {thread}=await r.json();await page.request.post(app.origin+'/api/threads/'+thread.id+'/name',{headers:{origin:app.origin},data:{name}});return thread.id;};
   const source=await create(vault,'论文讨论'),target=await create(project,'开发任务');
-  await adapter.call('mock/mcpApp',{threadId:source,turnId:'idea',items:[{id:'answer',type:'agentMessage',text:'把论文里的算法想法用于项目实验'}]});
+  await adapter.call('mock/turn',{threadId:source,turnId:'idea',items:[{id:'answer',type:'agentMessage',text:'把论文里的算法想法用于项目实验'}]});
   await page.goto('http://127.0.0.1:'+address.port);
   await page.evaluate(async({vault,source})=>{
    const entryPath='/web/main.ts',vuePath='/node_modules/.vite/deps/vue.js',storePath='/web/store.ts',componentPath='/obsidian-plugin/VaultApp.vue',stylePath='/obsidian-plugin/style.css';

@@ -29,8 +29,8 @@ const labels: Record<string, string> = { running: '进行中', completed: '已�
   <component v-else :is="expandable ? 'details' : 'div'" class="activity" :class="info.state" :data-kind="item.type" :open="expandable ? open : undefined" @toggle="open = ($event.target as HTMLDetailsElement).open">
     <component :is="expandable ? 'summary' : 'div'" class="activity-title"><span class="activity-label">{{ info.label }}</span><code v-if="command && info.subject" ref="subject" class="activity-command" :title="info.subject"></code><span v-else-if="info.subject" class="activity-subject" :title="info.subject">{{ info.subject }}</span><span class="activity-state">{{ labels[info.state] || info.state }}</span><time v-if="info.state === 'running' && item.startedAt" :data-since="item.startedAt"> {{ Math.max(0, Math.floor((now - item.startedAt) / 1000)) }}s</time></component>
     <template v-if="command">
-      <pre v-if="info.subject" class="activity-command-full"><div class="code-toolbar" data-copy-ignore><span>命令</span><button type="button" class="quiet" @click="emit('copy', item.command || '')">复制命令</button></div><code ref="commandCode"></code></pre>
-      <pre v-if="info.detail" class="activity-output"><div class="code-toolbar" data-copy-ignore><span>输出</span><button type="button" class="quiet" @click="emit('copy', outputText(item.aggregatedOutput || ''))">复制输出</button></div><code ref="output"></code></pre>
+      <pre v-if="info.subject" class="activity-command-full"><div class="code-toolbar" data-copy-ignore><span>命令</span><button type="button" class="quiet" @click="emit('copy', info.subject)">复制命令</button></div><code ref="commandCode"></code></pre>
+      <pre v-if="info.detail" class="activity-output"><div class="code-toolbar" data-copy-ignore><span>输出</span><button type="button" class="quiet" @click="emit('copy', outputText(info.detail))">复制输出</button></div><code ref="output"></code></pre>
     </template>
     <pre v-else-if="info.detail">{{ info.detail }}</pre>
   </component>

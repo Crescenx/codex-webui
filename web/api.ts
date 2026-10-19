@@ -1,8 +1,9 @@
 import type { ReferenceCapabilities } from "../shared/references.ts";
 import type { Model, Notice, PendingRequest, Skill, Thread } from '../shared/protocol.ts';
+import type { RuntimeCapabilities } from '../shared/runtime.ts';
 
 export type Attachment = { id: string; name: string; mime: string; size: number };
-export type Catalog = { capabilities?: { references?: ReferenceCapabilities }; models: Model[]; modes: { mode: string; name: string }[]; skills: Skill[]; errors: Record<string, string>; skillErrors: unknown[] };
+export type Catalog = { capabilities?: Partial<RuntimeCapabilities> & { references?: ReferenceCapabilities }; models: Model[]; modes: { mode: string; name: string }[]; skills: Skill[]; errors: Record<string, string>; skillErrors: unknown[] };
 export type Snapshot = { thread: Thread; requests: PendingRequest[]; uncertain?: boolean; seq: number };
 export type Update = Notice & { seq?: number };
 export type Directories = { roots: string[]; path: string | null; directories: string[] };
