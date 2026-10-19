@@ -47,6 +47,89 @@ const anchor = (page: Page) => page.locator('#conversation').evaluate(el => {
   return { key: row?.dataset.rowKey, inset: top - (row?.getBoundingClientRect().top || 0) };
 });
 
+test('folding a long active trace leaves no empty height between messages', async ({page},testInfo)=>{
+  const h=await fixture(page,1),a=h.threads[0]!;
+  const turn={id:'long-trace',status:'inProgress',items:[
+    {id:'user',type:'userMessage',content:[{type:'text',text:'检查编译结果。'}]},
+    ...Array.from({length:34},(_,i)=>({id:`cmd-${i}`,type:'commandExecution',command:`check ${i}`,status:'completed',aggregatedOutput:'done',exitCode:0})),
+  ]};
+  a.turns=[turn];
+  const notice=(method:string,params:Record<string,unknown>)=>h.adapter.emit('notice',{method,params:{threadId:a.id,turnId:turn.id,...params}});
+  try {
+    await page.locator(`[data-thread-id="${a.id}"]`).click();
+    await expect(page.locator('#conversation')).toContainText('check 33');
+    notice('item/started',{item:{id:'reply',type:'agentMessage',text:''}});
+    notice('item/agentMessage/delta',{itemId:'reply',delta:'编译完成。'});
+    await expect(page.locator('#conversation .trace-toggle')).toHaveAttribute('aria-expanded','false');
+    const gaps=()=>page.locator('#conversation').evaluate(el=>{
+      const rows=[...el.querySelectorAll<HTMLElement>('.virtual-row')].sort((a,b)=>Number(a.dataset.index)-Number(b.dataset.index));
+      return rows.map((r,i)=>i?r.getBoundingClientRect().top-rows[i-1]!.getBoundingClientRect().bottom:0);
+    });
+    await expect.poll(async()=>Math.max(...await gaps())).toBeLessThan(3);
+    await expect.poll(()=>page.locator('#conversation').evaluate(el=>el.scrollHeight-el.clientHeight)).toBeLessThan(2);
+    await page.screenshot({path:testInfo.outputPath('folded-long-trace.png')});
+  } finally {await h.stop();}
+});
+
+test('switching back after an offscreen trace folds restores contiguous row positions',async({page},testInfo)=>{
+  const h=await fixture(page,1),a=h.threads[0]!,b=h.threads[1]!;
+  a.turns=[{id:'offscreen-trace',status:'inProgress',items:[
+    {id:'user',type:'userMessage',content:[{type:'text',text:'检查编译结果。'}]},
+    ...Array.from({length:34},(_,i)=>({id:`cmd-${i}`,type:'commandExecution',command:`check ${i}`,status:'completed',aggregatedOutput:'done',exitCode:0})),
+  ]}];
+  const errors:string[]=[];page.on('pageerror',e=>errors.push(e.message));
+  try {
+    await page.locator(`[data-thread-id="${a.id}"]`).click();
+    await expect(page.locator('#conversation')).toContainText('check 33');
+    await switchTo(page,b.id,1);
+    a.turns[0]!.items.push({id:'reply',type:'agentMessage',text:'后台检查结束。'});a.turns[0]!.status='completed';
+    await page.locator(`[data-thread-id="${a.id}"]`).click();
+    await expect(page.locator('#conversation')).toContainText('后台检查结束。');
+    const positions=()=>page.locator('#conversation').evaluate(el=>{
+      const rows=[...el.querySelectorAll<HTMLElement>('.virtual-row')].sort((a,b)=>Number(a.dataset.index)-Number(b.dataset.index));
+      return {gap:Math.max(...rows.map((r,i)=>i?r.getBoundingClientRect().top-rows[i-1]!.getBoundingClientRect().bottom:0)),excess:el.scrollHeight-el.clientHeight};
+    });
+    await expect.poll(async()=>(await positions()).gap).toBeLessThan(3);
+    await expect.poll(async()=>(await positions()).excess).toBeLessThan(2);
+    expect(errors).toEqual([]);
+    await page.screenshot({path:testInfo.outputPath('restored-folded-trace.png')});
+  }finally{await h.stop();}
+});
+
+test('opening compact history measures rows above the initially estimated viewport',async({page},testInfo)=>{
+  const h=await fixture(page,1),a=h.threads[0]!;
+  await page.setViewportSize({width:1820,height:1100});
+  a.turns=[{id:'prior',status:'completed',items:[
+    {id:'user',type:'userMessage',content:[{type:'text',text:'生成课程讲义。'.repeat(20)}]},
+    ...Array.from({length:34},(_,i)=>({id:`cmd-${i}`,type:'commandExecution',command:`check ${i}`,status:'completed',aggregatedOutput:'done',exitCode:0})),
+    {id:'reply',type:'agentMessage',text:'正在后台编译讲义。'},
+    {id:'cmd-last',type:'commandExecution',command:'compile',status:'completed',exitCode:0},
+    {id:'reply-last',type:'agentMessage',text:'重新启动编译，等待完成。'},
+  ]},{id:'current',status:'inProgress',items:[
+    {id:'user',type:'userMessage',content:[{type:'text',text:'好了没'}]},
+    {id:'read',type:'dynamicToolCall',tool:'view_file',status:'completed',success:true,arguments:{filePath:'/tmp/doc.tex'},contentItems:[]},
+  ]}];
+  try {
+    await page.locator(`[data-thread-id="${a.id}"]`).click();
+    await expect(page.locator('#conversation')).toContainText('view_file');
+    const firstVisibleGap=()=>page.locator('#conversation').evaluate(el=>{
+      const top=el.getBoundingClientRect().top;
+      const boxes=[...el.querySelectorAll('.virtual-row')].map(r=>r.getBoundingClientRect()).filter(r=>r.bottom>top);
+      return Math.min(...boxes.map(r=>r.top))-top;
+    });
+    await expect.poll(firstVisibleGap).toBeLessThan(50);
+    await switchTo(page,h.threads[1]!.id,1);
+    await page.locator(`[data-thread-id="${a.id}"]`).click();
+    await expect(page.locator('#conversation')).toContainText('view_file');
+    await expect.poll(firstVisibleGap).toBeLessThan(50);
+    await page.reload();
+    await page.locator(`[data-thread-id="${a.id}"]`).click();
+    await expect(page.locator('#conversation')).toContainText('view_file');
+    await expect.poll(firstVisibleGap).toBeLessThan(50);
+    await page.screenshot({path:testInfo.outputPath('compact-history.png')});
+  }finally{await h.stop();}
+});
+
 test('trace opens while working, folds on reply, and keeps manual expansion across thread switches', async ({ page }, testInfo) => {
   const h = await fixture(page, 1), a = h.threads[0]!, b = h.threads[1]!;
   const turn = { id: 'live-trace', status: 'inProgress', items: [

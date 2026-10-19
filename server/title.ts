@@ -15,6 +15,8 @@ export async function generateTitle(parent: AppServer, text: string, model?: str
   try {
     cwd = await mkdtemp(path.join(os.tmpdir(), 'codex-viewer-title-'));
     if (google) worker.configureLaunch({env:{AGY_APP_SERVER_HOME:path.join(cwd,'state'),AGY_HARNESS_HOME:path.join(cwd,'state')}});
+    // A fresh worker needs the catalog to resolve UI model groups to native variants.
+    if (google) await worker.call('model/list', {});
     const config = object((await worker.call('config/read', { cwd })).config);
     const overrides: Obj = {
       'features.shell_tool': false, 'features.unified_exec': false, 'features.apps': false,
@@ -44,7 +46,10 @@ export async function generateTitle(parent: AppServer, text: string, model?: str
         }
         if (n.method === 'turn/completed') {
           if (object(n.params.turn).status === 'completed') resolve();
-          else reject(new Error('自动标题生成失败'));
+          else {
+            const message = object(object(n.params.turn).error || {}).message;
+            reject(new Error(typeof message === 'string' && message ? message : '自动标题生成失败'));
+          }
         }
       });
     });

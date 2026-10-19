@@ -42,14 +42,16 @@ test('Google titles use the Google worker with isolated storage and no tools', a
   codex.fork = () => {throw Error('Google title must not call Codex');};
   const google = new AppServer({command:process.execPath,args:[path.resolve('test/fake-codex.ts')]});
   const fork = google.fork.bind(google);
-  let state = '', unloaded = false;
+  let state = '', unloaded = false, catalogLoaded = false;
   google.fork = () => {
     const worker = fork();
     const configure = worker.configureLaunch.bind(worker);
     worker.configureLaunch = options => {state=options.env!.AGY_APP_SERVER_HOME!;configure(options);};
     const call = worker.call.bind(worker);
     worker.call = async (method, params = {}) => {
+      if (method === 'model/list') catalogLoaded = true;
       if (method === 'thread/start') {
+        assert.ok(catalogLoaded, 'load model variants before selecting a grouped Google model');
         assert.equal(params.model,'mock');assert.equal(params.ephemeral,true);
         assert.deepEqual(params.config,{tools_disabled:true,mcp_servers:{}});
         assert.equal(path.dirname(state),params.cwd);

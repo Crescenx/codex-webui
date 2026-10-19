@@ -66,6 +66,8 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
   const vaults = new VaultAssistant(options.dataDir);
   for (const v of vaults.all()) if (!roots.includes(v.root)) roots.push(v.root);
   const threads = new Map<string, Thread>();
+  // Historical snapshots do not imply a live native execution connection.
+  const resumedThreads = new Set<string>();
   const revisions=new WeakMap<Thread,number>();
   const goalRevisions = new Map<string, number>();
   function applyNotice(t:Thread,n:Notice) {
@@ -142,13 +144,13 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
   function browserThread(t:Thread):Thread {hybrid.observe(t);const view=hybrid.view(t);references.reconcile(view);const run=watchdogs.activeForThread(t.id);return {runtimeId:'codex',nativeSessionId:t.id,...view,capabilities:{...runtimeCapabilities(runtimeOf(view)),...view.capabilities},...references.data(view.id),...(run?{settings:run.foreground}:{})};}
   const runtimes = () => adapter.states();
   adapter.on('runtimeOnline',runtimeId=>publish('viewer/runtimeStatus',{runtimeId,runtimes:runtimes()}));
-  adapter.on('runtimeOffline',(runtimeId:RuntimeId)=>{hybrid.offline(runtimeId);for(const [id] of threads)if(runtimeForThread(id)===runtimeId){threads.delete(id);referenceReady.delete(id);}for(const [key,p] of pending)if(runtimeForThread(String(p.params.threadId))===runtimeId)pending.delete(key);publish('viewer/runtimeStatus',{runtimeId,runtimes:runtimes()});});
+  adapter.on('runtimeOffline',(runtimeId:RuntimeId)=>{hybrid.offline(runtimeId);for(const [id] of threads)if(runtimeForThread(id)===runtimeId){resumedThreads.delete(id);threads.delete(id);referenceReady.delete(id);}for(const [key,p] of pending)if(runtimeForThread(String(p.params.threadId))===runtimeId)pending.delete(key);publish('viewer/runtimeStatus',{runtimeId,runtimes:runtimes()});});
   adapter.on('online', () => { online = true; clearTimeout(reconnect); if (!restarting) { publish('viewer/online',{runtimeId:'codex',runtimes:runtimes()}); void recoverWatchdogs(); } });
   adapter.on('offline', () => {
     referenceReady.clear();
     hybrid.offline('codex');
     online = false; recovering = true;
-    for(const [id] of threads)if(runtimeForThread(id)==='codex')threads.delete(id);
+    for(const [id] of threads)if(runtimeForThread(id)==='codex'){resumedThreads.delete(id);threads.delete(id);}
     for(const id of goalRevisions.keys())if(runtimeForThread(id)==='codex')goalRevisions.delete(id);
     for(const [id,p] of pending)if(runtimeForThread(String(p.params.threadId))==='codex')pending.delete(id);
     for(const id of busy)if(runtimeForThread(id)==='codex')busy.delete(id);
@@ -165,7 +167,7 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
     }
     const id = typeof n.params.threadId === 'string' ? n.params.threadId : n.method === 'thread/started' ? (n.params.thread as Thread | undefined)?.id : undefined;
     if (id && threads.has(id)) applyNotice(threads.get(id)!, n);
-    if(n.method==='thread/archived' && id){publish('viewer/threadArchived',{threadId:id});threads.delete(id);uncertain.delete(id);return;}
+    if(n.method==='thread/archived' && id){publish('viewer/threadArchived',{threadId:id});resumedThreads.delete(id);threads.delete(id);uncertain.delete(id);return;}
     if (n.method === 'turn/started' && id) uncertain.delete(id);
     if (n.method === 'turn/completed' && id) {
       uncertain.delete(id);
@@ -196,7 +198,7 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
     requireCodexThread(id);
 
     if (opening.has(id)) return opening.get(id)!;
-    if (threads.has(id)) return threads.get(id)!;
+    if (resumedThreads.has(id) && threads.has(id)) return threads.get(id)!;
     const job = (async () => {
       const read = threadFrom((await adapter.call('thread/read', { threadId: id, includeTurns: false })).thread);
       await directory(read.cwd, roots);
@@ -208,7 +210,7 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
         const permission=await readPermissionMode(options.dataDir,id);
         const resumed = await remember(await adapter.call('thread/resume', { threadId: id, cwd: read.cwd, sandbox: permission==='bypass'?'danger-full-access':'workspace-write', approvalPolicy: permission==='bypass'?'never':'on-request', approvalsReviewer:reviewer, ...(choice === undefined || runtimeForThread(id)==='antigravity' ? {} : { config: { [contextKey]: choice } }) }),reviewer);
         threads.set(id, resumed); await refreshGoal(resumed); return resumed;
-      } catch (error) { threads.delete(id); throw error; }
+      } catch (error) { resumedThreads.delete(id); threads.delete(id); throw error; }
     })();
     opening.set(id, job);
     try { return await job; } finally { opening.delete(id); }
@@ -286,6 +288,7 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
     if(result.approvalsReviewer==='user' || result.approvalsReviewer==='auto_review')t.approvalsReviewer=result.approvalsReviewer;
     if(reviewer)await syncReviewer(t,reviewer);
     t.tokenUsage=threads.get(t.id)?.tokenUsage || t.tokenUsage;
+    resumedThreads.add(t.id);
     t.goal=threads.get(t.id)?.goal; t.goalError=threads.get(t.id)?.goalError; return t;
   }
   async function refreshGoal(t: Thread, strict = false) {
@@ -1029,7 +1032,7 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
       if(req.method==='POST' && action==='archive'){
         await body(req);const live=threads.get(id),t=await readThread(id);await refreshGoal(t,true);
         if(busy.has(id)||uncertain.has(id)||requestsFor(id).length||t.status?.type==='active'||live?.turns?.some(turn=>turn.status==='inProgress')||t.goal?.status==='active'||watchdogs.list().some(w=>w.threadId===id&&(w.state==='enabled'||w.running)))throw new HttpError(409,'请先停止任务、Goal 和定时监控，再删除会话');
-        busy.add(id);try{await adapter.call('thread/archive',{threadId:id});publish('viewer/threadArchived',{threadId:id});threads.delete(id);uncertain.delete(id);return json(res,{ok:true});}finally{releaseThread(id);}
+        busy.add(id);try{await adapter.call('thread/archive',{threadId:id});publish('viewer/threadArchived',{threadId:id});resumedThreads.delete(id);threads.delete(id);uncertain.delete(id);return json(res,{ok:true});}finally{releaseThread(id);}
       }
       if (req.method === 'GET' && action === 'subagents') {
         await readThread(id);

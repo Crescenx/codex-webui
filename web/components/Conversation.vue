@@ -43,13 +43,16 @@ const rows = computed(() => traceRows(allRows.value, reading, heldTrace.value));
 const mermaid = createMermaidRenderer(() => conversation.value); provide(mermaidKey, mermaid);
 const focusKey = ref(''), selectionRange = shallowRef<[number, number] | null>(null);
 const estimate = (index: number) => ['agentMessage', 'plan'].includes(rows.value[index]?.original.type || '') ? 320 : rows.value[index]?.original.type === 'userMessage' ? 100 : 65;
-const initialOffset = reading.follow ? rows.value.reduce((n, _, i) => n + estimate(i), 0) : reading.offset;
+const initialRect = { width: reading.width || 860, height: 800 }, padding = props.readonly ? 16 : 40;
+const initialSizes = new Map(reading.measurements.map(item => [item.key, item.size]));
+// The scroll offset is the viewport's top, not the end of the transcript.
+const initialOffset = reading.follow ? Math.max(0, 2 * padding + rows.value.reduce((n, row, i) => n + (initialSizes.get(row.key) ?? estimate(i)), 0) - initialRect.height) : reading.offset;
 const virtualizer = useVirtualizer(computed(() => {
   const list = rows.value, focused = list.findIndex(row => row.key === focusKey.value), held = selectionRange.value;
   return { count: list.length, getScrollElement: () => conversation.value || null, estimateSize: estimate, getItemKey: (index: number) => list[index]!.key,
     anchorTo: follow.value ? 'end' as const : 'start' as const, scrollEndThreshold: 100,
-    overscan: 4, paddingStart: props.readonly ? 16 : 40, paddingEnd: props.readonly ? 16 : 40,
-    initialOffset, initialMeasurementsCache: reading.measurements, initialRect: { width: reading.width || 860, height: 800 },
+    overscan: 4, paddingStart: padding, paddingEnd: padding,
+    initialOffset, initialMeasurementsCache: reading.measurements, initialRect,
     rangeExtractor: (range: Parameters<typeof defaultRangeExtractor>[0]) => {
       const indices = new Set(defaultRangeExtractor(range));
       if (focused >= 0) indices.add(focused);
