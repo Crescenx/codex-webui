@@ -52,6 +52,18 @@ test('activity lifecycle, summaries and plans are reduced without empty details'
   assert.equal(activity({id:'read',type:'dynamicToolCall',result:{summary:null}},turn).subject,'');
   reduceNotice(t,{method:'item/plan/delta',params:{...params,itemId:'p',delta:'a plan'}});assert.equal(turn.items[1].text,'a plan');
 });
+test('disconnected execution stops running state and preserves received history',()=>{
+  const t:Thread={id:'t',cwd:'/tmp',status:{type:'active'},turns:[{id:'done',status:'completed',items:[]},{id:'active',status:'inProgress',items:[{id:'message',type:'userMessage'}]}]};
+  reduceNotice(t,{method:'viewer/executionState',params:{threadId:'t',uncertain:true,error:'connection lost'}});
+  assert.equal(t.executionUncertain,true);
+  assert.equal(t.status?.type,'systemError');
+  assert.equal(t.turns![0].status,'completed');
+  assert.equal(t.turns![1].status,'failed');
+  assert.deepEqual(t.turns![1].error,{message:'connection lost'});
+  assert.equal(t.turns![1].items[0].id,'message');
+  reduceNotice(t,{method:'turn/started',params:{threadId:'t',turn:{id:'active',status:'inProgress',items:[]}}});
+  assert.equal(t.turns![1].status,'failed');
+});
 test('short titles and metadata refresh preserve live state and explicit cleared names',()=>{
   assert.equal(shortTitle(' \n# 修复   会话标题\n完整任务要求'),'修复 会话标题');
   assert.equal(Array.from(shortTitle('😀'.repeat(80))).length,60);

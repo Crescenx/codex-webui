@@ -22,7 +22,8 @@ export function desktopClient(host: DesktopHost): ReturnType<typeof createClient
     });
   }
   return {
-    async request<T>(pathname:string,data?:unknown,signal?:AbortSignal):Promise<T>{
+    async request<T>(pathname:string,data?:unknown,signal?:AbortSignal,method: 'POST' | 'PUT' = 'POST'):Promise<T>{
+      if(method==='PUT')throw new Error('请在浏览器 Viewer 中调整审批方式');
       if(pathname==='/files/open' && data){
         const {threadId,target}=data as Obj;
         const fragment=/#(?!L\d+$).*$/.exec(String(target))?.[0] || '';

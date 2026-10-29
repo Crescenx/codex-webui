@@ -24,3 +24,15 @@ export function permissionPolicy(mode: PermissionMode | null, cwd: string) {
     ? { approvalPolicy: 'never', sandboxPolicy: { type: 'dangerFullAccess' } }
     : { approvalPolicy: 'on-request', sandboxPolicy: { type: 'workspaceWrite', writableRoots: [cwd], networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true } };
 }
+
+export async function readDefaultPermissionMode(dataDir:string):Promise<'auto'|'manual'> {
+  try {const {mode}=JSON.parse(await readFile(path.join(dataDir,'default-permissions.json'),'utf8'));if(mode==='auto'||mode==='manual')return mode;throw new Error('无效默认审批配置');}
+  catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return 'auto';throw error;}
+}
+export async function saveDefaultPermissionMode(dataDir:string,mode:unknown){
+  if(mode!=='auto'&&mode!=='manual')throw new HttpError(400,'默认审批须为 auto 或 manual');
+  await mkdir(dataDir,{recursive:true,mode:0o700});
+  const file=path.join(dataDir,'default-permissions.json'),tmp=file+'.'+crypto.randomUUID()+'.tmp';
+  await writeFile(tmp,JSON.stringify({mode})+'\n',{mode:0o600});await rename(tmp,file);
+}
+export async function effectivePermissionMode(dataDir:string,id:string){return await readPermissionMode(dataDir,id)??await readDefaultPermissionMode(dataDir);}

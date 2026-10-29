@@ -13,6 +13,7 @@ const notice = (method: string, params: Obj) => send({ method, params });
 const waiting = new Map<string, () => void>();
 const queued = new Map<string, Obj[]>();
 let enabled=true;
+let nativeEventsExcluded=false;
 const reordered=process.env.VIEWER_FAKE_REORDER_TURNS==='1';
 const bracketAnswer=String.raw`\[
 x=F_C\!\left(\theta B[s+(1-s)e^{-q(A,x)\tau(A,K)}]\right).
@@ -29,7 +30,11 @@ createInterface({ input: process.stdin }).on('line', line => {
   const m = JSON.parse(line); const p = m.params || {};
   if (!m.method) { waiting.get(String(m.id))?.(); waiting.delete(String(m.id)); return; }
   const reply = (result: unknown) => send({ id: m.id, result });
-  if (m.method === 'initialize') return reply({});
+  if (m.method === 'initialize') {nativeEventsExcluded=Array.isArray(p.capabilities?.optOutNotificationMethods)&&p.capabilities.optOutNotificationMethods.includes('native/event');return reply({});}
+  if(m.method==='mock/nativeSnapshot'){
+    if(!nativeEventsExcluded)notice('native/event',{event:{appStateUpdate:{text:'x'.repeat(35_450_488)}}});
+    return reply({ready:true});
+  }
   if (m.method === 'account/read') return reply({ account: { type:'chatgpt', planType:'pro' } });
   if (m.method === 'config/read') return reply({ config: { model:'mock', model_provider:'openai', approvals_reviewer:'auto_review' } });
   if(m.method==='mock/agents'){
@@ -165,11 +170,19 @@ createInterface({ input: process.stdin }).on('line', line => {
       },250);
       return;
     }
+    if(p.toolOutput){
+      if(p.input.length)throw Error('toolOutput requires empty input');
+      const active=t.turns?.find(turn=>turn.status==='inProgress');
+      if(active){
+        const item={id:'result-'+ ++next,type:'functionCallOutput',...p.toolOutput};
+        active.items.push(item);notice('item/started',{threadId:t.id,turnId:active.id,item});notice('item/completed',{threadId:t.id,turnId:active.id,item});reply({turn:active});return;
+      }
+    }
     if(p.approvalsReviewer)t.approvalsReviewer=p.approvalsReviewer;
     if(!t.preview)t.preview=p.input[0]?.text || '附件任务';
     if(p.collaborationMode)t.settings={model:p.collaborationMode.settings.model,effort:p.collaborationMode.settings.reasoning_effort,mode:p.collaborationMode.mode};
     notice('thread/settings/updated',{threadId:t.id,threadSettings:{...t.settings,approvalsReviewer:t.approvalsReviewer,collaborationMode:p.collaborationMode||{mode:t.settings?.mode}}});
-    const turn: Turn = { id: 'turn-' + ++next, status: 'inProgress', items: [{ id: reordered?'user':'user-' + next, clientId:p.clientUserMessageId || null, type: 'userMessage', content: p.input }] };
+    const turn: Turn = { id: 'turn-' + ++next, status: 'inProgress', items: [p.toolOutput?{id:'result-'+next,type:'functionCallOutput',...p.toolOutput}:{ id: reordered?'user':'user-' + next, clientId:p.clientUserMessageId || null, type: 'userMessage', content: p.input }] };
     t.turns!.push(turn); t.status = { type: 'active' };
     t.tokenUsage = { last: { totalTokens: 25000 }, modelContextWindow: 100000 };
     notice('thread/tokenUsage/updated', { threadId: t.id, turnId: turn.id, tokenUsage: { ...t.tokenUsage, total: { totalTokens: 500000 } } });

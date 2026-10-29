@@ -11,16 +11,18 @@ export function activityState(item:Item,turn:Turn) {
 }
 export function activity(item:Item,turn:Turn) {
   const state = activityState(item, turn);
+  const agentResult=item.type==='collabAgentToolCall'&&item.tool==='agentResult';
 
   const action=item.action as {type?:string;query?:string;queries?:string[];url?:string}|undefined;
   const title=item.type==='reasoning'?(state==='running'?'思考中':'思考'):
     item.type==='webSearch'?(action?.type==='openPage'?'打开网页：'+(action.url||''):'搜索：'+(item.query||action?.query||action?.queries?.join('、')||'网页')):
     item.type==='commandExecution'?'执行命令：'+(item.command||''):
     item.type==='fileChange'?'修改文件':item.type==='mcpToolCall'?`工具：${item.server||''} / ${item.tool||''}`:
-    item.type==='contextCompaction'?'压缩上下文':item.type==='collabAgentToolCall'?`子代理调用：${item.tool || ''}`:item.type==='subAgentActivity'?`子代理活动：${item.agentPath || item.agentThreadId || ''}`:String(item.tool||item.type);
+    item.type==='contextCompaction'?'压缩上下文':item.type==='collabAgentToolCall'?(agentResult?'子代理结果':`子代理调用：${item.tool || ''}`):item.type==='subAgentActivity'?`子代理活动：${item.agentPath || item.agentThreadId || ''}`:String(item.tool||item.type);
   let detail=item.type==='reasoning'?(item.summary||[]).filter(Boolean).join('\n\n'):
     item.type==='commandExecution'?String(item.aggregatedOutput||''):
     item.type==='webSearch'?(action?Object.entries(action).filter(([k,v])=>k!=='type'&&v).map(([k,v])=>`${k}: ${Array.isArray(v)?v.join('\n'):v}`).join('\n'):''):
+    agentResult?String(item.prompt||''):
     item.type==='collabAgentToolCall'?[item.prompt, Array.isArray(item.receiverThreadIds) ? item.receiverThreadIds.join('、') : '', '调用状态不代表子代理执行状态，请查看右侧面板。'].filter(Boolean).join('\n\n'):
     item.type==='fileChange'?'':JSON.stringify(item.result||item.error||item.changes||'',null,2);
   if(detail==='""')detail='';

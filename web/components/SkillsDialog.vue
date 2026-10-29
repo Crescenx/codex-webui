@@ -12,7 +12,7 @@ const nameCounts = computed(() => { const counts = new Map<string, number>(); fo
 const matches = computed(() => matchingSkills(draft.value?.catalog.skills || [], search.value).filter(s => view.value !== 'selected' || selected.value.has(s.path)));
 async function show(query = '') { search.value = query; view.value = 'all'; dialog.value?.showModal(); await nextTick(); input.value?.focus(); }
 watch(() => current.value?.id, () => dialog.value?.close());
-const loading = computed(() => store.state.hydrating || draft.value?.loading);
+const loading = computed(() => store.state.hydrating || draft.value?.extrasLoading);
 const message = computed(() => !current.value ? '请先选择项目。' : loading.value ? '正在加载此项目的 Skills…' : draft.value?.catalog.errors.load || draft.value?.catalog.errors.skills ? 'Skills 加载失败：' + (draft.value.catalog.errors.load || draft.value.catalog.errors.skills) : !draft.value?.catalog.skills.length ? '此项目没有发现可用的 Skill。' : '');
 async function toggle(skill: Skill) {
   const id = current.value?.id; if (!id) return;

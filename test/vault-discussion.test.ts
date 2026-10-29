@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { discussionPrompt } from '../obsidian-plugin/discussion.ts';
 import { desktopClient } from '../obsidian-plugin/client.ts';
-import { renderMarkdown } from '../web/render.ts';
+import { renderMarkdown } from '../web/markdown.ts';
 import { setMaterialHost } from '../web/environment.ts';
 test('desktop SSE preserves Unicode line separators across chunks and adjacent events',{timeout:5000},async()=>{
  const text='x'.repeat(7340)+'\u2028后半段\u2029结束',events:unknown[]=[],errors:unknown[]=[];

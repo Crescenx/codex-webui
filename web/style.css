@@ -407,6 +407,7 @@ main {
 .conversation.has-history { padding-block: 0; overflow-anchor: none; }
 .virtual-list { position: relative; width: 100%; }
 .virtual-row { position: absolute; top: 0; left: 0; width: 100%; display: flow-root; }
+.virtual-row:has([data-layout-pending]) { min-height: var(--pending-height); }
 .trace-toggle { display: flex; align-items: center; gap: 10px; width: 100%; margin: 4px 0 14px; padding: 8px 10px; text-align: left; font-size: 12px; }
 .trace-toggle[aria-expanded="true"] { margin-bottom: 8px; }
 .trace-action { margin-left: auto; color: var(--text-secondary); }
@@ -1621,3 +1622,6 @@ dialog.workspace-dialog[open], #skills-dialog[open] { display: flex; flex-direct
 .conversation-search-portal{display:contents}
 .runtime-status { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin-block:6px; }
 .runtime-recovery { padding:8px 12px; border:1px solid var(--border); border-radius:6px; }
+
+.permission-feedback { font-size: 12px; max-width: 320px; overflow-wrap: anywhere; }
+.auto-review-recovery p { overflow-wrap: anywhere; white-space: pre-wrap; }

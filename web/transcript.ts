@@ -3,7 +3,6 @@ import type { InjectionKey } from 'vue';
 import type { VirtualItem } from '@tanstack/vue-virtual';
 import type { Item, Turn } from '../shared/protocol.ts';
 import { activity, activityState } from './activity.ts';
-import { renderMarkdown } from './render.ts';
 import type { Rendered } from './render.ts';
 
 export type ItemView = { open: boolean; files: string[]; traceActive?: boolean };
@@ -46,12 +45,16 @@ export function groupTraces(rows: TranscriptRow[]): TranscriptRow[] {
   }
   return rows;
 }
-export function traceRows(rows: TranscriptRow[], reading: Reading, heldTrace = ''): TranscriptRow[] {
+export function traceRows(rows: TranscriptRow[], reading: Reading, heldTrace = '', autoCollapse = true): TranscriptRow[] {
   return rows.flatMap(row => {
     const group = row.trace;
     if (!group) return [row];
     const view = itemView(reading, group.key);
-    if (view.traceActive !== group.active) { view.traceActive = group.active; view.open = group.active; }
+    if (view.traceActive !== group.active) {
+      view.traceActive = group.active;
+      // New output must not remove the history the user is currently reading.
+      if (group.active || autoCollapse) view.open = group.active;
+    }
     const open = view.open || heldTrace === group.key;
     const header = group.firstKey === row.key ? [{ ...row, key: group.key, traceHeader: true, traceOpen: open }] : [];
     return open ? [...header, row] : header;
@@ -61,7 +64,7 @@ export type Reading = { follow: boolean; anchor: string; inset: number; offset: 
 export function createTranscriptMemory() {
   const views = new Map<string, Reading>();
   const rendered = new Map<string, { source: string; result: Rendered; bytes: number }>();
-  let bytes = 0;
+  let bytes = 0, generation=0;
   return {
     reading(id: string): Reading {
       const value = views.get(id) || { follow: true, anchor: '', inset: 0, offset: 0, width: 0, measurements: [], items: new Map() };
@@ -69,19 +72,20 @@ export function createTranscriptMemory() {
       while (views.size > 8) views.delete(views.keys().next().value!);
       return value;
     },
-    render(key: string, source: string, threadId: string | undefined, blocks: Map<string, string>, complete: boolean) {
+    async render(key: string, source: string, load: () => Promise<Rendered>, complete: boolean) {
       const previous = rendered.get(key);
       if (previous?.source === source && complete) { rendered.delete(key); rendered.set(key, previous); return previous.result; }
-      if (previous) { bytes -= previous.bytes; rendered.delete(key); }
-      const result = renderMarkdown(source, threadId, blocks);
-      if (complete) {
-        const size = 2 * (key.length + source.length + result.html.length + [...result.atoms.values()].reduce((n, s) => n + s.length, 0) + result.diagrams.reduce((n, d) => n + d.source.length, 0));
+      const version=generation;
+      const result = await load();
+      if (complete&&generation===version) {
+        const replaced=rendered.get(key);if(replaced){bytes-=replaced.bytes;rendered.delete(key);}
+        const size = 2 * (key.length + source.length + result.html.length * 2 + [...result.atoms.values()].reduce((n, s) => n + s.length, 0) + result.diagrams.reduce((n, d) => n + d.source.length, 0));
         if (size <= 16 * 1024 * 1024) { rendered.set(key, { source, result, bytes: size }); bytes += size; }
         while (rendered.size > 200 || bytes > 16 * 1024 * 1024) { const first = rendered.keys().next().value!; bytes -= rendered.get(first)!.bytes; rendered.delete(first); }
       }
       return result;
     },
-    clear() { views.clear(); rendered.clear(); bytes = 0; },
+    clear() { generation++;views.clear(); rendered.clear(); bytes = 0; },
   };
 }
 export const transcriptMemoryKey: InjectionKey<ReturnType<typeof createTranscriptMemory>> = Symbol('transcriptMemory');

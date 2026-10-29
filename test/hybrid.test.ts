@@ -9,6 +9,7 @@ import {AgentWorkspaces} from '../server/agent-workspace.ts';
 import {HybridSessions} from '../server/hybrid.ts';
 import {DatabaseSync} from 'node:sqlite';
 import type {Thread,Obj} from '../shared/protocol.ts';
+import {reduceNotice} from '../shared/protocol.ts';
 
 async function until(check:()=>boolean|Promise<boolean>){for(let i=0;i<250;i++){if(await check())return;await delay(20);}throw Error('condition not reached');}
 async function fixture(dir:string){
@@ -19,6 +20,30 @@ async function fixture(dir:string){
   const http=async(route:string,body?:unknown)=>{const response=await fetch(app.origin+'/api'+route,{method:body===undefined?'GET':'POST',headers:{cookie,origin:app.origin,'content-type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});const value=await response.json();if(!response.ok)throw Object.assign(Error(value.error),{status:response.status});return value;};
   return {app,adapter,http};
 }
+
+test('hybrid checkpoints migrate legacy history and persist only changed items',async()=>{
+  const dir=await mkdtemp('/tmp/viewer-hybrid-incremental-'),file=dir+'/hybrid.sqlite';
+  const snapshot:Thread={id:'incremental',cwd:dir,status:{type:'idle'},turns:[{id:'old',status:'completed',items:[{id:'large',type:'agentMessage',text:'history '.repeat(100000)}]},{id:'current',status:'completed',items:[{id:'answer',type:'agentMessage',text:'before'}]}]};
+  const db=new DatabaseSync(file);
+  db.exec('CREATE TABLE conversations(id TEXT PRIMARY KEY,data TEXT NOT NULL)');
+  db.prepare('INSERT INTO conversations VALUES (?,?)').run(snapshot.id,JSON.stringify({id:snapshot.id,active:snapshot.id,bindings:[{runtimeId:'codex',sessionId:snapshot.id,cursor:0}],snapshot,handoffs:[],inherited:[{text:'context '.repeat(100000)}]}));
+  const unexpected=async():Promise<never>=>{throw Error('must not execute');};
+  const hooks={load:unexpected,create:unexpected,submit:unexpected,stop:unexpected,recover:unexpected,ready:()=>true,authorize:async(cwd:string)=>cwd,addWorkspace:()=>{}};
+  let hybrid=new HybridSessions(file,dir+'/copies',hooks);
+  try{
+    db.exec('CREATE TABLE written(id TEXT); CREATE TRIGGER record_item_write AFTER INSERT ON conversation_items BEGIN INSERT INTO written VALUES(NEW.id); END;');
+    const notice={method:'item/agentMessage/delta',params:{threadId:snapshot.id,turnId:'current',itemId:'answer',delta:' after'}};
+    reduceNotice(snapshot,notice);hybrid.observe(snapshot,false,notice);
+    hybrid.observe(snapshot,false,{method:'thread/tokenUsage/updated',params:{threadId:snapshot.id}});
+    hybrid.rename(snapshot.id,'saved');
+    assert.deepEqual(db.prepare('SELECT id FROM written').all().map(row=>row.id),['answer']);
+    assert.ok(String(db.prepare('SELECT data FROM conversations').get()!.data).length<1000);
+    assert.equal(hybrid.cached(snapshot.id).turns![1].items[0].text,'before after');
+    await hybrid.stop();
+    hybrid=new HybridSessions(file,dir+'/copies',hooks);
+    assert.deepEqual(hybrid.cached(snapshot.id).turns!.map(t=>t.items.map(i=>i.text)),snapshot.turns!.map(t=>t.items.map(i=>i.text)));
+  }finally{await hybrid.stop();db.close();await rm(dir,{recursive:true,force:true});}
+});
 
 test('retired runtime APIs reject requests while Codex creation remains available',async()=>{
   const dir=await mkdtemp('/tmp/viewer-retired-runtime-'),f=await fixture(dir);
@@ -87,8 +112,8 @@ test('delegation uses a dirty working copy, coexists with native children, retur
     const sibling=(await f.http('/threads',{cwd:dir+'/project'})).thread;
     await assert.rejects(f.adapter.call('mock/agents',{threadId:sibling.id,name:'apply_agent',arguments:{agentId:childId,operationId:'invalid',revision:diff.revision}}),/直接派发/);
     await until(()=>f.app.hybrid.cached(childId).hybrid?.agent?.deliveryState==='delivered');
-    const receipts=f.app.hybrid.operations(parent.id).filter(r=>r.kind==='child-result');assert.equal(receipts.length,1);
-    await f.app.hybrid.tick();assert.equal(f.app.hybrid.operations(parent.id).filter(r=>r.kind==='child-result').length,1);
+    const receipts=f.app.hybrid.operations(parent.id).filter(r=>r.kind==='child-result');assert.ok(receipts.length<=1);
+    await f.app.hybrid.tick();assert.equal(f.app.hybrid.operations(parent.id).filter(r=>r.kind==='child-result').length,receipts.length);
   }finally{await f.app.stop();await rm(dir,{recursive:true,force:true});}
 });
 
@@ -119,4 +144,106 @@ test('three-way apply preserves independent parent edits and rejects a later cha
     await writeFile(source+'/a.txt','later user edit\n');await assert.rejects(manager.apply(w,'recovery',diff.revision),/来源发生变化/);
     assert.equal(await readFile(source+'/a.txt','utf8'),'later user edit\n');
   }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test('unread results enter an active parent as tools and polling consumes results once',async()=>{
+  const dir=await mkdtemp('/tmp/viewer-result-delivery-'),f=await fixture(dir);
+  try{
+    const parent=(await f.http('/threads',{cwd:dir+'/project'})).thread;
+    const call=(name:string,args:Obj)=>f.adapter.call('mock/agents',{threadId:parent.id,name,arguments:args});
+    const started=await call('spawn_agent',{operationId:'push-child',task:'Return one result'});
+    const childId=String((started.result as Obj).threadId);
+    await f.adapter.call('turn/start',{threadId:parent.id,input:[{type:'text',text:'hold-tool'}]});
+    await until(()=>f.app.hybrid.cached(childId).hybrid?.agent?.deliveryState==='delivered');
+    const native=await f.adapter.call('thread/read',{threadId:parent.id,includeTurns:true});
+    const turns=(native.thread as Thread).turns!;
+    assert.equal(turns.length,1);assert.equal(turns[0].status,'inProgress');
+    assert.equal(turns[0].items.filter(i=>i.type==='userMessage').length,1);
+    assert.equal(turns[0].items.filter(i=>i.type==='functionCallOutput').length,1);
+    await until(()=>f.app.hybrid.cached(parent.id).turns!.some(t=>t.items.some(i=>i.type==='collabAgentToolCall'&&i.tool==='agentResult')));
+    const read=await call('wait_agent',{agentId:childId,timeoutMs:0});assert.equal(read.alreadyDelivered,true);assert.equal(read.result,undefined);
+    f.app.hybrid.pauseResultWake(parent.id,true);
+    const second=await call('spawn_agent',{operationId:'read-child',task:'Return another result'});
+    const secondId=String((second.result as Obj).threadId);
+    await until(()=>f.app.hybrid.cached(secondId).agentState==='completed');
+    const readOnce=await call('wait_agent',{agentId:secondId,timeoutMs:0});assert.ok(readOnce.result);
+    f.app.hybrid.pauseResultWake(parent.id,false);await f.app.hybrid.tick();
+    assert.equal(f.app.hybrid.operations(parent.id).filter(r=>r.kind==='child-result').length,1);
+  }finally{await f.app.stop();await rm(dir,{recursive:true,force:true});}
+});
+
+test('unread completed revisions retain their own turn when a child continues',async()=>{
+  const dir=await mkdtemp('/tmp/viewer-result-queue-'),f=await fixture(dir);
+  try{
+    const parent=(await f.http('/threads',{cwd:dir+'/project'})).thread;
+    const call=(name:string,args:Obj)=>f.adapter.call('mock/agents',{threadId:parent.id,name,arguments:args});
+    await f.app.hybrid.selectModel(parent.id,{model:'fake-model',effort:null,mode:'default'});f.app.hybrid.pauseResultWake(parent.id,true);
+    const started=await call('spawn_agent',{operationId:'queue-first',task:'First result'});
+    const childId=String((started.result as Obj).threadId);
+    await until(()=>f.app.hybrid.cached(childId).agentState==='completed');
+    const firstTurn=f.app.hybrid.cached(childId).turns!.at(-1)!.id;
+    await call('send_input',{agentId:childId,operationId:'queue-second',message:'Second result'});
+    await until(()=>f.app.hybrid.cached(childId).hybrid!.agent!.resultRevision===2);
+    const first=await call('wait_agent',{agentId:childId,timeoutMs:0});
+    assert.equal((first.result as Obj).resultRevision,1);assert.equal((first.result as Obj).turnId,firstTurn);
+    const second=await call('wait_agent',{agentId:childId,timeoutMs:0});
+    assert.equal((second.result as Obj).resultRevision,2);assert.notEqual((second.result as Obj).turnId,firstTurn);
+    assert.equal((await call('wait_agent',{agentId:childId,timeoutMs:0})).alreadyDelivered,true);
+    f.app.hybrid.pauseResultWake(parent.id,false);await f.app.hybrid.tick();
+    assert.equal(f.app.hybrid.operations(parent.id).filter(r=>r.kind==='child-result').length,0);
+  }finally{await f.app.stop();await rm(dir,{recursive:true,force:true});}
+});
+
+test('lost result replies reconcile exact native history without a second delivery',async()=>{
+  const dir=await mkdtemp('/tmp/viewer-result-unknown-'),f=await fixture(dir);
+  try{
+    const parent=(await f.http('/threads',{cwd:dir+'/project'})).thread;
+    await f.app.hybrid.selectModel(parent.id,{model:'fake-model',effort:null,mode:'default'});f.app.hybrid.pauseResultWake(parent.id,true);
+    const call=(name:string,args:Obj)=>f.adapter.call('mock/agents',{threadId:parent.id,name,arguments:args});
+    const children:string[]=[];
+    for(let i=0;i<2;i++){
+      const started=await call('spawn_agent',{operationId:'batch-'+i,task:'Batch result '+i});
+      children.push(String((started.result as Obj).threadId));
+    }
+    await until(()=>children.every(id=>f.app.hybrid.cached(id).agentState==='completed'));
+    const original=f.adapter.call.bind(f.adapter);let sends=0;
+    f.adapter.call=async(method,params)=>{
+      const result=await original(method,params);
+      if(method==='turn/start'&&params?.toolOutput){sends++;throw Error('fixture: response lost after acceptance');}
+      return result;
+    };
+    f.app.hybrid.pauseResultWake(parent.id,false);await f.app.hybrid.tick();
+    const receipt=f.app.hybrid.operations(parent.id).find(r=>r.kind==='child-result')!;
+    assert.equal(receipt.state,'unknown');assert.equal((receipt.result!.results as Obj[]).length,2);
+    // Polling cannot repeat an outcome that the push may already have delivered.
+    for(const child of children)assert.equal((await call('wait_agent',{agentId:child,timeoutMs:0})).result,undefined);
+    await until(async()=>{await f.app.hybrid.tick();return children.every(id=>f.app.hybrid.cached(id).hybrid!.agent!.deliveryState==='delivered');});
+    assert.equal(sends,1);
+    assert.equal(f.app.hybrid.operations(parent.id).find(r=>r.id===receipt.id)!.state,'completed');
+    const native=await original('thread/read',{threadId:parent.id,includeTurns:true});
+    assert.equal((native.thread as Thread).turns!.flatMap(t=>t.items).filter(i=>i.type==='functionCallOutput').length,1);
+  }finally{await f.app.stop();await rm(dir,{recursive:true,force:true});}
+});
+
+test('new empty Codex parents and children use creation state until the first turn',async()=>{
+  const dir=await mkdtemp('/tmp/viewer-empty-delegation-'),f=await fixture(dir);
+  try{
+    const original=f.adapter.call.bind(f.adapter),empty=new Set<string>();
+    f.adapter.call=async(method,params)=>{
+      if(method==='thread/read'&&empty.has(String(params?.threadId)))
+        throw Error('fixture: unmaterialized rollout is empty');
+      const result=await original(method,params);
+      if(method==='thread/start')empty.add(String((result.thread as Thread).id));
+      if(method==='turn/start')empty.delete(String(params?.threadId));
+      return result;
+    };
+    const parent=(await f.http('/threads',{cwd:dir+'/project'})).thread;
+    const started=await f.adapter.call('mock/agents',{threadId:parent.id,name:'spawn_agent',arguments:{operationId:'empty-parent',task:'Reply once'}});
+    const childId=String((started.result as Obj).threadId);
+    await until(()=>f.app.hybrid.cached(childId).hybrid?.agent?.deliveryState==='delivered');
+    const native=await original('thread/read',{threadId:parent.id,includeTurns:true});
+    const items=(native.thread as Thread).turns!.flatMap(t=>t.items);
+    assert.equal(items.filter(i=>i.type==='userMessage').length,0);
+    assert.equal(items.filter(i=>i.type==='functionCallOutput').length,1);
+  }finally{await f.app.stop();await rm(dir,{recursive:true,force:true});}
 });

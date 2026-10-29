@@ -16,6 +16,84 @@ class Fake extends AppServer {
   override respond(id:unknown,result:Obj){this.replies.push({id,result});}
   override stop(){}
 }
+test('Google terminal errors expose the model rejection in both history and live events',async()=>{
+ const google=new Fake(),adapter=new RuntimeServers(new Fake(),google);
+ const turn={id:'failed',status:'failed',items:[],error:{message:'Agent execution terminated due to error.',additionalDetails:null},
+   nativeStop:{error:{modelErrorMessage:'FAILED_PRECONDITION (code 400): User location is not supported for the API use.'}}};
+ google.call=async()=>({thread:{id:'native',cwd:'/workspace',turns:[turn]}});
+ const result=await adapter.call('thread/read',{threadId:'agy:native'});
+ const history=((result.thread as Obj).turns as Obj[])[0];
+ assert.equal((history.error as Obj).message,turn.nativeStop.error.modelErrorMessage);
+ const notices:Obj[]=[];adapter.on('notice',n=>notices.push(n));
+ google.emit('notice',{method:'turn/completed',params:{threadId:'native',turn}});
+ const live=(notices[0].params as Obj).turn as Obj;
+ assert.equal((live.error as Obj).message,turn.nativeStop.error.modelErrorMessage);
+});
+test('late model and quota successes notify clients and are reusable without another slow read',async t=>{
+ t.mock.timers.enable({apis:['setTimeout','Date']});
+ for(const runtime of ['codex','antigravity'] as const){
+  const codex=new Fake(),google=new Fake(),slow=runtime==='codex'?codex:google;
+  const releases=new Map<string,(value:Obj)=>void>();let reads=0;
+  slow.call=async(method)=>{reads++;return new Promise<Obj>(resolve=>releases.set(method,resolve));};
+  const adapter=new RuntimeServers(codex,google),notices:Obj[]=[];
+  adapter.on('notice',n=>notices.push(n));
+  const models=adapter.call('model/list'),quota=adapter.call('account/rateLimits/read');
+  await new Promise(setImmediate);t.mock.timers.tick(2000);
+  assert.ok(((await models).runtimeErrors as Obj)[runtime]);assert.ok(((await quota).runtimeErrors as Obj)[runtime]);
+  releases.get('model/list')!({data:[{model:'late'}],nextCursor:null});
+  releases.get('account/rateLimits/read')!({rateLimitsByLimitId:{[runtime==='codex'?'codex':'antigravity-google']:{limitId:runtime}}});
+  await new Promise(setImmediate);
+  assert.equal(notices.length,2);assert.ok(notices.every(n=>n.method==='viewer/catalogUpdated'));
+  const recovered=await adapter.call('model/list'),usage=await adapter.call('account/rateLimits/read');
+  assert.deepEqual(recovered.runtimeErrors,{});assert.deepEqual(usage.runtimeErrors,{});
+  assert.ok((recovered.data as Obj[]).some(m=>m.model===(runtime==='codex'?'late':'antigravity/late')));
+  assert.equal(reads,2);
+  slow.emit('offline');slow.call=async()=>{reads++;throw Error('provider offline');};
+  assert.ok(((await adapter.call('model/list')).runtimeErrors as Obj)[runtime]);
+  assert.equal(reads,3);
+ }
+});
+test('slow catalog providers cannot block healthy results or multiply pending reads',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});
+ const codex=new Fake(),google=new Fake(),adapter=new RuntimeServers(codex,google);
+ let resolve!: (v:Obj)=>void,calls=0;
+ google.call=async()=>{calls++;return new Promise<Obj>(r=>{resolve=r;});};
+ codex.call=async()=>({data:[{id:'c',updatedAt:1}],nextCursor:null});
+ const first=adapter.call('thread/list');
+ await new Promise(setImmediate);
+ t.mock.timers.tick(2000);
+ const partial=await first;
+ assert.deepEqual((partial.data as Obj[]).map(v=>v.id),['c']);
+ assert.match(String((partial.runtimeErrors as Obj).antigravity),/响应过慢/);
+ assert.ok(partial.nextCursor);
+ const retry=adapter.call('thread/list',{cursor:partial.nextCursor});
+ await new Promise(setImmediate);
+ assert.equal(calls,1);
+ resolve({data:[{id:'g'}],nextCursor:null});
+ const recovered=await retry;
+ assert.deepEqual((recovered.data as Obj[]).map(v=>v.id),['agy:g']);
+ assert.equal(recovered.nextCursor,null);
+ assert.equal(adapter.states().find(r=>r.id==='antigravity')?.error,undefined);
+});
+test('model and quota reads tolerate a stalled provider, while turn writes keep their acknowledgment',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});
+ for(const slow of ['codex','antigravity'] as const){
+  const codex=new Fake(),google=new Fake(),adapter=new RuntimeServers(codex,google);
+  const stalled=slow==='codex'?codex:google;
+  const release:((v:Obj)=>void)[]=[];
+  stalled.call=async()=>new Promise<Obj>(r=>release.push(r));
+  const models=adapter.call('model/list'),quota=adapter.call('account/rateLimits/read');
+  let finished=false;
+  const turn=adapter.call('turn/start',{model:slow==='codex'?'model':'antigravity/model'}).then(()=>{finished=true;});
+  await new Promise(setImmediate);
+  t.mock.timers.tick(2000);
+  assert.equal(((await models).data as Obj[]).length,1);
+  assert.ok(((await quota).runtimeErrors as Obj)[slow]);
+  assert.equal(finished,false);
+  release.forEach(r=>r({}));
+  await turn;
+ }
+});
 test('dual app servers qualify identities and preserve request provenance',async()=>{
   const codex=new Fake(),google=new Fake(),adapter=new RuntimeServers(codex,google);
   const models=await adapter.call('model/list');
@@ -26,6 +104,8 @@ test('dual app servers qualify identities and preserve request provenance',async
   assert.equal(google.calls.at(-1)?.params.model,'model');
   assert.equal(codex.calls.filter(c=>c.method==='thread/start').length,0);
   const notices:Obj[]=[];adapter.on('notice',n=>notices.push(n));
+  google.emit('notice',{method:'native/event',params:{threadId:'native',event:{appStateUpdate:{raw:'diagnostic'}}}});
+  assert.equal(notices.length,0);
   google.emit('notice',{method:'thread/tokenUsage/updated',params:{threadId:'native',tokenUsage:{total:{cachedInputTokens:50}}}});
   assert.equal((notices[0].params as Obj).threadId,'agy:native');
   const requests:Obj[]=[];adapter.on('request',r=>requests.push(r));
@@ -98,4 +178,18 @@ test('quota aggregation preserves Codex and both Antigravity groups independentl
  const notices:Obj[]=[];adapter.on('notice',n=>notices.push(n.params));
  google.emit('notice',{method:'account/rateLimits/updated',params:{rateLimits:{limitId:'codex'},rateLimitResetCredits:{availableCount:99},rateLimitsByLimitId:{'antigravity-google':g,codex:c}}});
  assert.deepEqual(notices[0],{rateLimitsByLimitId:{'antigravity-google':g}});
+});
+
+test('Google child identities connect history and live tool items to the same agent tree',async()=>{
+ const google=new Fake(),adapter=new RuntimeServers(new Fake(),google);
+ const item={id:'call',type:'collabAgentToolCall',senderThreadId:'parent',receiverThreadIds:['child'],agentsStates:{child:{status:'completed'}},prompt:'child is literal text'};
+ google.call=async()=>({thread:{id:'child',cwd:'/workspace',readOnly:false,nativeRuntime:'app-core-v1',source:{subAgent:{thread_spawn:{parent_thread_id:'parent'}}},turns:[{id:'turn',items:[item]}]}});
+ const r=await adapter.call('thread/read',{threadId:'agy:child'}),t=r.thread as Obj;
+ assert.equal(t.parentThreadId,'agy:parent');
+ const projected=((t.turns as Obj[])[0].items as Obj[])[0];
+ assert.equal(projected.senderThreadId,'agy:parent');assert.deepEqual(projected.receiverThreadIds,['agy:child']);assert.deepEqual(projected.agentsStates,{'agy:child':{status:'completed'}});assert.equal(projected.prompt,'child is literal text');
+ const notices:Obj[]=[];adapter.on('notice',n=>notices.push(n.params));
+ google.emit('notice',{method:'item/completed',params:{threadId:'parent',item}});
+ google.emit('notice',{method:'turn/completed',params:{threadId:'parent',turn:{id:'turn',items:[item]}}});
+ assert.deepEqual(notices[0].item,projected);assert.deepEqual(((notices[1].turn as Obj).items as Obj[])[0],projected);
 });

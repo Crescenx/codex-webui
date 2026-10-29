@@ -57,24 +57,25 @@ test('reasoning groups preserve native rows, stop at messages and turns, and upd
   assert.match(searchableText(rows[1]!.original, rows[1]!.turn), /\*\*Original summary\*\*/);
 });
 
-test('transcript memory reuses complete source renders, bounds caches and clears all session state', () => {
+test('transcript memory reuses complete source renders, bounds caches and clears all session state', async () => {
   const memory = createTranscriptMemory(), blocks = new Map<string, string>();
-  const render = (key: string, source = '$x^2$ **source**', complete = true) => memory.render(key, source, 'a', blocks, complete);
-  const first = render('a'); assert.equal(render('a'), first); assert.ok(first.atoms.size);
-  assert.notEqual(render('a', 'changed'), first);
-  assert.notEqual(render('a', 'changed', false), render('a', 'changed', false));
-  const recent = render('recent'), oldest = render('0', 'text'); for (let i = 1; i < 199; i++) render(String(i), 'text');
-  assert.equal(render('recent'), recent); render('overflow', 'text');
-  assert.notEqual(render('0', 'text'), oldest);
-  const large = 'x'.repeat(2_100_000), largeFirst = render('large-first', large);
-  render('large-second', large); assert.notEqual(render('large-first', large), largeFirst);
+  const {renderMarkdown}=await import('../web/markdown.ts');
+  const render = (key: string, source = '$x^2$ **source**', complete = true) => memory.render(key, source, async()=>renderMarkdown(source,'a',blocks),complete);
+  const first = await render('a'); assert.equal(await render('a'), first); assert.ok(first.atoms.size);
+  assert.notEqual(await render('a', 'changed'), first);
+  assert.notEqual(await render('a', 'changed', false), await render('a', 'changed', false));
+  const recent = await render('recent'), oldest = await render('0', 'text'); for (let i = 1; i < 199; i++) await render(String(i), 'text');
+  assert.equal(await render('recent'), recent); await render('overflow', 'text');
+  assert.notEqual(await render('0', 'text'), oldest);
+  const large = 'x'.repeat(2_100_000), largeFirst = await render('large-first', large);
+  await render('large-second', large); assert.notEqual(await render('large-first', large), largeFirst);
   const reading = memory.reading('a'); itemView(reading, 'row').open = true; reading.anchor = 'row';
   for (let i = 0; i < 7; i++) memory.reading(String(i));
   assert.equal(memory.reading('a'), reading); memory.reading('extra');
   assert.equal(itemView(memory.reading('a'), 'row').open, true);
   for (let i = 0; i < 8; i++) memory.reading('other-' + i);
   assert.notEqual(memory.reading('a'), reading);
-  const cached = render('clear'); memory.clear(); assert.notEqual(render('clear'), cached); assert.equal(memory.reading('a').anchor, '');
+  const cached = await render('clear'); memory.clear(); assert.notEqual(await render('clear'), cached); assert.equal(memory.reading('a').anchor, '');
 });
 
 test('full-history search reads raw math, questions, command output and file diffs', () => {

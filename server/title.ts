@@ -14,7 +14,7 @@ export async function generateTitle(parent: AppServer, text: string, model?: str
   let cwd: string | undefined;
   try {
     cwd = await mkdtemp(path.join(os.tmpdir(), 'codex-viewer-title-'));
-    if (google) worker.configureLaunch({env:{AGY_APP_SERVER_HOME:path.join(cwd,'state'),AGY_HARNESS_HOME:path.join(cwd,'state')}});
+    if (google) worker.configureLaunch({env:{AGY_APP_SERVER_HOME:path.join(cwd,'state')}});
     // A fresh worker needs the catalog to resolve UI model groups to native variants.
     if (google) await worker.call('model/list', {});
     const config = object((await worker.call('config/read', { cwd })).config);

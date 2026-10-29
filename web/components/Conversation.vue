@@ -2,7 +2,7 @@
 import { viewerDocument, viewerWindow, viewerRoot, isElement, isHTMLElement } from '../environment.ts';
 
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, provide, ref, shallowRef, toRaw, watch } from 'vue';
-import { defaultRangeExtractor, useVirtualizer } from '@tanstack/vue-virtual';
+import { defaultRangeExtractor, observeElementOffset, useVirtualizer } from '@tanstack/vue-virtual';
 import type { DeepReadonly } from 'vue';
 import type { Item, Thread } from '../../shared/protocol.ts';
 import { runtimeName } from '../../shared/runtime.ts';
@@ -18,6 +18,7 @@ import QuestionCard from './QuestionCard.vue';
 import ReferenceDialog from './ReferenceDialog.vue';
 import ReferenceCard from './ReferenceCard.vue';
 import { referenceCategory, referenceSelectable } from '../../shared/references.ts';
+import { createMathContextIndex } from '../math-context.ts';
 const emit = defineEmits<{ new: []; find: [] }>();
 const props = defineProps<{ thread?: DeepReadonly<Thread>; readonly?: boolean; searchInSidebar?:boolean }>();
 const store = useViewer(), current = computed(() => props.readonly ? props.thread : store.current.value);
@@ -39,7 +40,10 @@ function project(): TranscriptRow[] {
   return groupTraces(groupReasoning((toRaw(current.value)?.turns || []).flatMap(turn => turn.items.map(item => ({ key: `${threadId.value}:${turn.id}:${item.id}`, original: toRaw(item) as Item, turn: { id: turn.id, status: turn.status, items: [] } })))));
 }
 const conversation = ref<HTMLElement>(), allRows = shallowRef(project()), heldTrace = ref('');
-const rows = computed(() => traceRows(allRows.value, reading, heldTrace.value));
+const mathIndex = createMathContextIndex();
+const mathContexts = computed(() => mathIndex(allRows.value.map(row => row.original)));
+const rows = computed(() => traceRows(allRows.value, reading, heldTrace.value, follow.value));
+const rowIndices = computed(() => new Map(rows.value.map((row, index) => [row.key, index])));
 const mermaid = createMermaidRenderer(() => conversation.value); provide(mermaidKey, mermaid);
 const focusKey = ref(''), selectionRange = shallowRef<[number, number] | null>(null);
 const estimate = (index: number) => ['agentMessage', 'plan'].includes(rows.value[index]?.original.type || '') ? 320 : rows.value[index]?.original.type === 'userMessage' ? 100 : 65;
@@ -47,12 +51,19 @@ const initialRect = { width: reading.width || 860, height: 800 }, padding = prop
 const initialSizes = new Map(reading.measurements.map(item => [item.key, item.size]));
 // The scroll offset is the viewport's top, not the end of the transcript.
 const initialOffset = reading.follow ? Math.max(0, 2 * padding + rows.value.reduce((n, row, i) => n + (initialSizes.get(row.key) ?? estimate(i)), 0) - initialRect.height) : reading.offset;
+let syncOffset:((scrolling?:boolean)=>void)|undefined;
+const observeOffset:typeof observeElementOffset<HTMLElement>=(instance,callback)=>{
+  const sync=(scrolling=false)=>{if(instance.scrollElement)callback(instance.scrollElement.scrollTop,scrolling);};
+  syncOffset=sync;
+  const cleanup=observeElementOffset(instance,callback);
+  return ()=>{if(syncOffset===sync)syncOffset=undefined;cleanup?.();};
+};
 const virtualizer = useVirtualizer(computed(() => {
   const list = rows.value, focused = list.findIndex(row => row.key === focusKey.value), held = selectionRange.value;
   return { count: list.length, getScrollElement: () => conversation.value || null, estimateSize: estimate, getItemKey: (index: number) => list[index]!.key,
-    anchorTo: follow.value ? 'end' as const : 'start' as const, scrollEndThreshold: 100,
+    anchorTo: 'start' as const,
     overscan: 4, paddingStart: padding, paddingEnd: padding,
-    initialOffset, initialMeasurementsCache: reading.measurements, initialRect,
+    initialOffset, initialMeasurementsCache: reading.measurements, initialRect, observeElementOffset:observeOffset,
     rangeExtractor: (range: Parameters<typeof defaultRangeExtractor>[0]) => {
       const indices = new Set(defaultRangeExtractor(range));
       if (focused >= 0) indices.add(focused);
@@ -61,6 +72,8 @@ const virtualizer = useVirtualizer(computed(() => {
     },
   };
 }));
+// This component owns scroll anchoring; the virtualizer only measures/positions rows.
+virtualizer.value.shouldAdjustScrollPositionOnItemSizeChange = () => false;
 const snapshots = new Map<string, { original: Item; item: Item }>();
 const visible = computed(() => {
   const items = virtualizer.value.getVirtualItems();
@@ -74,7 +87,8 @@ const visible = computed(() => {
     return [{ ...row, item, source: messageSource(item), message: ['agentMessage', 'userMessage', 'plan', 'handoff'].includes(item.type), virtual: v, view: itemView(reading, row.key) }];
   });
 });
-let frame = 0, layoutFrame = 0, disposed = false, restoring = true, jumpedTo = '', lastOffset = 0;
+let frame = 0, layoutQueued = false, disposed = false, jumpedTo = '';
+let userScrolling = false, waitingForScroll = false, resumeAtBottom = false, writtenOffset = initialOffset;
 let removeCopy = () => {}, removeLinks = () => {}, resize: ResizeObserver | undefined;
 async function copy(text: string) { try { await viewerWindow().navigator.clipboard.writeText(text); store.toast('已复制'); } catch { store.toast('无法访问剪贴板，请选中文字后复制'); } }
 function selected() { const s = viewerWindow().getSelection(); return !!s && !s.isCollapsed && !!s.anchorNode && !!conversation.value?.contains(s.anchorNode); }
@@ -87,24 +101,24 @@ function hold(event?: Event) {
   heldTrace.value = viewerDocument().querySelector('dialog[open]') ? allRows.value.find(row => row.key === focusKey.value)?.trace?.key || '' : '';
   if (event?.type === 'selectionchange' && !selected()) schedule();
 }
-function measure(el: unknown) { virtualizer.value.measureElement(isHTMLElement(el) ? el : null); }
+function measure(el: unknown) {
+  if (isHTMLElement(el) && el.querySelector('[data-layout-pending]')) return;
+  virtualizer.value.measureElement(isHTMLElement(el) ? el : null);
+}
+function contentLayout(element?: HTMLElement) {
+  void nextTick(() => { if (!disposed) { measure(element?.closest('.virtual-row')); layout(); } });
+}
 function savePosition() {
-  const el = conversation.value; if (!el || restoring) return;
+  const el = conversation.value; if (!el) return;
   const v = virtualizer.value.getVirtualItems().find(v => v.end > el.scrollTop);
   reading.follow = follow.value; reading.offset = el.scrollTop; reading.width = el.clientWidth;
   if (v) { reading.anchor = String(v.key); reading.inset = el.scrollTop - v.start; }
 }
-async function jump(index: number, inset = 0) {
+function jump(index: number, inset = 0) {
   if (index < 0) return;
-  restoring = true;
-  // Expanding a trace changes row indices; let the virtualizer consume the new list first.
-  await nextTick(); if (disposed) return;
-  virtualizer.value.scrollToIndex(index, { align: 'start', behavior: 'auto' });
-  void nextTick(() => {
-    const v = virtualizer.value.getVirtualItems().find(v => v.index === index);
-    if (v && inset) virtualizer.value.scrollToOffset(v.start + inset);
-    requestAnimationFrame(() => { if (!disposed) { restoring = false; savePosition(); } });
-  });
+  follow.value = false; userScrolling = waitingForScroll = resumeAtBottom = false;
+  reading.anchor = rows.value[index]!.key; reading.inset = inset;
+  layout();
 }
 function toggleTrace(row: TranscriptRow) {
   const position = virtualizer.value.getVirtualItems().find(v => v.key === row.key);
@@ -114,27 +128,33 @@ function toggleTrace(row: TranscriptRow) {
   jump(rows.value.findIndex(r => r.key === row.key), inset);
 }
 function layout() {
-  if (layoutFrame || disposed) return;
-  layoutFrame = requestAnimationFrame(() => {
-    layoutFrame = 0; if (disposed || selected()) return;
-    // A single write follows growth without leaving an index scroll fighting the user's wheel.
-    if (follow.value && conversation.value) { conversation.value.scrollTop = conversation.value.scrollHeight; lastOffset = conversation.value.scrollTop; }
+  if (layoutQueued || disposed) return;
+  layoutQueued = true;
+  // Commit row transforms and the anchor correction before the same browser paint.
+  void nextTick(() => {
+    layoutQueued = false;
+    const el = conversation.value;
+    if (!el || disposed || selected() || waitingForScroll) return;
+    const index = rowIndices.value.get(reading.anchor);
+    // Unmeasured rows can overflow the sizer; anchoring to that overflow remounts them in a loop.
+    const offset = follow.value ? Math.max(0, virtualizer.value.getTotalSize() - el.clientHeight) : index === undefined ? el.scrollTop
+      : (virtualizer.value.getOffsetForIndex(index, 'start')?.[0] ?? el.scrollTop) + reading.inset;
+    if (Math.abs(el.scrollTop - offset) > 1) el.scrollTop = offset;
+    writtenOffset = el.scrollTop;
+    if (Math.abs((virtualizer.value.scrollOffset ?? 0) - el.scrollTop) > 1) syncOffset?.();
+    reading.follow = follow.value; reading.offset = el.scrollTop; reading.width = el.clientWidth;
   });
 }
 async function paint() {
   frame = 0; if (disposed || selected()) return;
-  savePosition(); allRows.value = project();
+  allRows.value = project();
   await nextTick(); if (disposed) return;
   if (targetTurn.value && targetTurn.value !== jumpedTo) {
     if(targetItem.value){const found=allRows.value.find(r=>r.turn.id===targetTurn.value && r.original.id===targetItem.value);if(found?.trace)itemView(reading,found.trace.key).open=true;}
     const index = rows.value.findIndex(row => row.turn.id === targetTurn.value && (!targetItem.value || row.original.id===targetItem.value && !row.traceHeader));
     if (index >= 0) { jumpedTo = targetTurn.value; follow.value = false; jump(index); return; }
   }
-  if (restoring && rows.value.length) {
-    if (follow.value) virtualizer.value.scrollToEnd();
-    else jump(rows.value.findIndex(row => row.key === reading.anchor), reading.inset);
-    requestAnimationFrame(() => { if (!disposed) restoring = false; });
-  } else layout();
+  layout();
 }
 function schedule() { if (!frame && !disposed) frame = requestAnimationFrame(() => { void paint(); }); }
 watch(() => store.state.revisions[threadId.value], schedule);
@@ -143,17 +163,30 @@ watch(targetTurn, () => { jumpedTo = ''; schedule(); });
 watch(targetItem, () => { jumpedTo = ''; schedule(); });
 function scroll() {
   const el = conversation.value; if (!el) return;
-  // Allow layout slack while following; after a manual scroll, only resume at the actual bottom.
-  if (!restoring && Math.abs(el.scrollTop - lastOffset) > 1) follow.value = el.scrollHeight - el.clientHeight - el.scrollTop < (follow.value ? 100 : 1);
-  lastOffset = el.scrollTop; savePosition();
+  syncOffset?.(true);
+  if (userScrolling && Math.abs(el.scrollTop - writtenOffset) > 1) {
+    waitingForScroll = false;
+    if (resumeAtBottom && el.scrollHeight - el.clientHeight - el.scrollTop < 1) follow.value = true;
+    savePosition();
+  }
+  layout();
 }
 function manualScroll(event: WheelEvent | KeyboardEvent | PointerEvent) {
   const el = conversation.value; if (!el || el.scrollHeight <= el.clientHeight) return;
+  if ('deltaY' in event && event.ctrlKey) return;
   const editing = isElement(event.target) && event.target.closest('input, textarea, select, [contenteditable]');
   const readingUp = 'deltaY' in event ? event.deltaY < 0 : 'key' in event ? !editing && ['ArrowUp', 'PageUp', 'Home'].includes(event.key) : event.target === el && event.clientX >= el.getBoundingClientRect().right - (el.offsetWidth - el.clientWidth);
-  if (readingUp) { follow.value = false; restoring = false; }
+  const readingDown = 'deltaY' in event ? event.deltaY > 0 : 'key' in event ? !editing && ['ArrowDown', 'PageDown', 'End', ' '].includes(event.key) : readingUp;
+  if (readingUp || readingDown) {
+    resumeAtBottom = !readingUp || 'pointerId' in event;
+    userScrolling = true;
+    const atBottom = el.scrollHeight - el.clientHeight - el.scrollTop < 1;
+    follow.value = resumeAtBottom && atBottom; savePosition();
+    waitingForScroll = !('pointerId' in event) && (readingUp ? el.scrollTop > 0 : !atBottom);
+  }
 }
-function latest() { follow.value = true; restoring = true; virtualizer.value.scrollToEnd(); requestAnimationFrame(() => { if (!disposed) { restoring = false; savePosition(); } }); }
+function scrollEnd() { userScrolling = waitingForScroll = resumeAtBottom = false; layout(); }
+function latest() { userScrolling = waitingForScroll = resumeAtBottom = false; follow.value = true; layout(); }
 
 const searchHost=computed(()=>props.searchInSidebar?viewerRoot().querySelector<HTMLElement>('#sidebar-conversation-search'):null);
 const searchOpen = ref(false), query = ref(''), searchInput = ref<HTMLInputElement>(), hitIndex = ref(0);
@@ -200,14 +233,15 @@ onMounted(() => {
   let width = reading.width;
   resize = new ResizeObserver(() => {
     const next = conversation.value?.clientWidth || 0;
-    if (width && next && next !== width) { savePosition(); reading.measurements = []; virtualizer.value.measure(); if (follow.value) layout(); else jump(rows.value.findIndex(r => r.key === reading.anchor), reading.inset); }
+    if (width && next && next !== width) { reading.measurements = []; virtualizer.value.measure(); }
     width = next;
+    layout();
   }); resize.observe(conversation.value!); schedule();
 });
 onBeforeUnmount(() => {
-  savePosition(); reading.measurements = virtualizer.value.takeSnapshot();
+  reading.follow = follow.value; reading.measurements = virtualizer.value.takeSnapshot();
   if (selected()) viewerWindow().getSelection()?.removeAllRanges();
-  disposed = true; clearTimeout(searchTimer); resize?.disconnect(); mermaid.dispose(); cancelAnimationFrame(frame); cancelAnimationFrame(layoutFrame);
+  disposed = true; clearTimeout(searchTimer); resize?.disconnect(); mermaid.dispose(); cancelAnimationFrame(frame);
   viewerDocument().removeEventListener('selectionchange', hold); viewerDocument().removeEventListener('focusin', hold); viewerDocument().removeEventListener('keydown', keys); removeCopy(); removeLinks();
 });
 defineExpose({openSearch});
@@ -231,12 +265,12 @@ defineExpose({openSearch});
     <span role="status">已选 {{ selectedRecords.size }} 条 · 其中工具 {{ selectedTools }} 条</span><span class="subtle">默认只选文字；展开工具后可逐条勾选</span>
     <button v-if="selectedTools" type="button" class="quiet" @click="clearToolRecords">清除所选工具</button><button type="button" :disabled="!selectedRecords.size" @click="forwardRecords">转发到…</button>
   </div>
-  <div :id="readonly ? 'agent-conversation' : 'conversation'" class="conversation" :class="{ 'has-history': rows.length }" ref="conversation" tabindex="0" :aria-label="readonly ? '子代理执行记录' : '对话记录'" @scroll="scroll" @pointerdown="hold($event); manualScroll($event)" @wheel.passive="manualScroll" @keydown="manualScroll">
+  <div :id="readonly ? 'agent-conversation' : 'conversation'" class="conversation" :class="{ 'has-history': rows.length }" ref="conversation" tabindex="0" :aria-label="readonly ? '子代理执行记录' : '对话记录'" @scroll="scroll" @scrollend="scrollEnd" @pointerdown="hold($event); manualScroll($event)" @wheel.passive="manualScroll" @keydown="manualScroll">
     <div v-if="!current && !readonly && !threadId" class="welcome"><div class="eyebrow">YOUR WORK, IN FOCUS</div><h2>从一个项目开始。</h2><p>选择左侧已有对话，或选择项目目录新建任务。<br>选好项目后，即可设置模型、思考强度、Plan 和 Skills。</p><button id="welcome-new" class="primary" @click="emit('new')">选择项目，新建任务</button></div>
     <p v-if="!rows.length && !readonly && store.state.hydrating" class="subtle">正在读取对话…</p>
     <button v-if="!readonly && store.draft.value?.readError" class="quiet" @click="store.selectThread(threadId)">重新读取对话</button>
     <div v-if="rows.length" class="virtual-list" :style="{ height: virtualizer.getTotalSize() + 'px' }">
-      <div v-for="row in visible" :key="row.key" :ref="measure" class="virtual-row" :data-index="row.virtual.index" :data-row-key="row.key" :style="{ transform: `translateY(${row.virtual.start}px)` }">
+      <div v-for="row in visible" :key="row.key" :ref="measure" class="virtual-row" :data-index="row.virtual.index" :data-row-key="row.key" :style="{ transform: `translateY(${row.virtual.start}px)`, '--pending-height': row.virtual.size + 'px' }">
         <button v-if="row.traceHeader" type="button" class="quiet trace-toggle" :aria-expanded="row.traceOpen" :data-turn-id="row.turn.id" data-copy-ignore @pointerdown="follow = false" @click="toggleTrace(row)">
           <span aria-hidden="true">{{ row.traceOpen ? '▾' : '▸' }}</span><span>思考与工具</span><span class="subtle">{{ row.trace!.count }} 条<span v-if="row.trace!.active"> · 进行中</span></span><span class="trace-action">{{ row.traceOpen ? '收起' : '展开' }}</span>
           <strong v-if="selectedInTrace(row.trace!.key)">已选 {{ selectedInTrace(row.trace!.key) }} 条工具记录</strong>
@@ -245,8 +279,8 @@ defineExpose({openSearch});
           <label v-if="selecting && referenceCategory(row.item)" class="record-select" data-copy-ignore><input type="checkbox" :checked="selectedRecords.has(row.key)" :disabled="!referenceSelectable(row.item,row.turn)" @change="toggleRecord(row)"> {{ referenceCategory(row.item)==='tool'?'选择此工具记录':'选择此消息' }}<span v-if="!referenceSelectable(row.item,row.turn)">（仍在生成）</span></label>
           <div class="message-header" data-copy-ignore :hidden="!row.message"><span v-if="row.message">{{ row.item.type === 'userMessage' ? (readonly ? '任务输入' : '你') : row.item.type === 'handoff' ? '接手记录' : runtimeName((row.item.source || current || {}) as {runtimeId?: 'codex'}) + (row.item.type === 'plan' ? ' · Plan' : '') }}</span><button v-if="row.item.type === 'agentMessage' || row.item.type === 'plan'" type="button" class="quiet" @click="copy(row.source)">复制 Markdown</button></div>
           <QuestionCard v-if="!readonly && row.item.type === 'agentMessage' && row.item.delivery === 'async' && row.item.questions?.length" :item="row.item" :turn="row.turn" />
-          <MessageBody v-else-if="row.message" :source="referenceMessage(row.item)?.text ?? row.source" :markdown="row.item.type !== 'userMessage'" :thread-id="threadId" :item-key="row.key" :complete="row.turn.status !== 'inProgress'" @copy="copy" @layout="layout" />
-          <ReasoningBlock v-else-if="row.reasoning" :item="row.item" :turn="row.turn" :group="row.reasoning" :thread-id="threadId" :item-key="row.key" @copy="copy" @layout="layout" />
+          <MessageBody v-else-if="row.message" :source="referenceMessage(row.item)?.text ?? row.source" :markdown="row.item.type !== 'userMessage'" :thread-id="threadId" :item-key="row.key" :complete="row.turn.status !== 'inProgress'" :math-definitions="mathContexts.get(row.item.id)" @copy="copy" @layout="contentLayout" />
+          <ReasoningBlock v-else-if="row.reasoning" :item="row.item" :turn="row.turn" :group="row.reasoning" :thread-id="threadId" :item-key="row.key" :math-definitions="mathContexts.get(row.item.id)" @copy="copy" @layout="contentLayout" />
           <ActivityBlock v-else :item="row.item" :turn="row.turn" :cwd="current?.cwd" :view="row.view" @copy="copy" />
           <ReferenceCard v-for="r in messageReferences(row.item)" :key="r.id" :reference="r" @toggle="layout" />
         </article>

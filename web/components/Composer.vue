@@ -3,7 +3,10 @@ import { viewerDocument, viewerWindow, viewerRoot } from '../environment.ts';
 
 import { computed, nextTick, ref, watch } from 'vue';
 import type { Skill } from '../../shared/protocol.ts';
+import {runtimeForModel} from '../../shared/runtime.ts';
 import { useViewer } from '../store.ts';
+import AutoReviewRecovery from './AutoReviewRecovery.vue';
+import PermissionSelect from './PermissionSelect.vue';
 import GoalPanel from './GoalPanel.vue';
 import ReferenceDialog from './ReferenceDialog.vue';
 import ReferenceCard from './ReferenceCard.vue';
@@ -31,18 +34,19 @@ async function chooseSkill(skill: Skill) {
 }
 watch(() => current.value?.id, () => { suggest.value = false; candidate.value = 0; });
 watch(candidate, () => void nextTick(() => viewerDocument().getElementById('skill-candidate-' + candidate.value)?.scrollIntoView({ block: 'nearest' })));
-const loading = computed(() => !current.value || store.state.hydrating || draft.value?.loading);
+const loading = computed(() => !current.value || (store.state.hydrating || draft.value?.loading) && (!draft.value?.catalog.models.length || !draft.value?.catalog.modes.length));
 const catalog = computed(() => draft.value?.catalog);
 const desired = computed(() => draft.value?.desired || current.value?.settings);
 const models = computed(() => {
-  const list = (catalog.value?.models || []).map(m => ({ value: m.model, label: m.displayName, disabled: !!current.value?.contextManagement && m.supportsExperimentalContext !== true }));
-  if (desired.value?.model && !list.some(m => m.value === desired.value!.model)) list.unshift({ value: desired.value.model, label: desired.value.model + '（当前配置）', disabled: !!current.value?.contextManagement });
+  const list = (catalog.value?.models || []).map(m => ({ value: m.model, label: m.displayName, disabled: !!current.value?.contextManagement && m.supportsExperimentalContext !== true, unsupported: m.supportsExperimentalContext === false }));
+  if (desired.value?.model && !list.some(m => m.value === desired.value!.model)) list.unshift({ value: desired.value.model, label: desired.value.model + '（当前配置）', disabled: !!current.value?.contextManagement, unsupported: false });
   return list;
 });
 const model = computed(() => catalog.value?.models.find(m => m.model === desired.value?.model));
+const modelError = computed(() => catalog.value?.errors.load || catalog.value?.errors.models || catalog.value?.errors['models:'+runtimeForModel(desired.value?.model)]);
 const googlePlan = computed(() => desired.value?.model.startsWith('antigravity/') && desired.value.mode === 'plan');
 const modes = computed(() => (catalog.value?.modes || []).filter(m => !model.value?.supportedModes || model.value.supportedModes.includes(m.mode)));
-const unavailable = computed(() => loading.value || !catalog.value?.models.length || !catalog.value?.modes.length);
+const unavailable = computed(() => loading.value || store.state.hydrating || !catalog.value?.models.length || !catalog.value?.modes.length);
 const sendReason = computed(() => canSend.value ? active.value ? '保留当前执行；模型设置下轮生效' : 'Enter 发送 · Shift+Enter 换行' : draft.value?.uncertain ? '提交状态尚未确认，请先核对会话' : draft.value?.readError || (store.state.authExpired ? '登录已过期，请重新打开 Viewer' : store.contextBlocked.value ? '请选择支持实验上下文管理的模型' : store.state.hydrating ? '正在同步会话' : draft.value?.uploading ? '正在上传附件' : draft.value?.sending ? '正在提交消息' : draft.value?.stopping ? '正在停止任务' : draft.value?.goalSaving ? '正在保存 Goal' : active.value && current.value?.capabilities?.steer===false ? '当前后端不支持执行中追加，请等待完成或先停止' : store.state.restarting || store.state.restartPending ? '正在重启后端' : '等待会话与配置准备完成'));
 function change(field: 'model' | 'effort' | 'mode', event: Event) {
   if (!desired.value) return;
@@ -69,23 +73,27 @@ function keydown(event: KeyboardEvent) {
 </script>
 
 <template>
-  <form id="composer" ref="form" :hidden="!current" :class="{ drag: dragging }" @submit.prevent="store.send()" @dragover.prevent="dragging = true" @dragleave="dragging = false" @drop.prevent="drop">
+  <p v-if="current?.readOnly" class="runtime-recovery" role="status">旧版 Antigravity 会话仅供查看。请新建会话继续，历史记录已保留。</p>
+  <form v-else id="composer" ref="form" :hidden="!current" :class="{ drag: dragging }" @submit.prevent="store.send()" @dragover.prevent="dragging = true" @dragleave="dragging = false" @drop.prevent="drop">
+    <AutoReviewRecovery v-if="current?.autoReviewFailure" :key="current.id+current.autoReviewFailure.id"/>
     <div class="controls">
       <label>模型 <select id="model" aria-label="模型" :disabled="unavailable" :value="loading ? '' : desired?.model" :title="models.find(m => m.value === desired?.model)?.label || ''" @change="change('model', $event)">
-        <option v-if="loading" value="">{{ current ? '正在加载…' : '请先选择项目' }}</option><option v-else-if="!models.length" value="">暂无可用选项</option><template v-else><option v-for="m in models" :key="m.value" :value="m.value" :disabled="m.disabled">{{ m.label }}{{ m.disabled ? '（不支持实验上下文）' : '' }}</option></template>
+        <option v-if="loading" value="">{{ current ? '正在加载…' : '请先选择项目' }}</option><option v-else-if="!models.length" value="">暂无可用选项</option><template v-else><option v-for="m in models" :key="m.value" :value="m.value" :disabled="m.disabled">{{ m.label }}{{ m.disabled ? m.unsupported ? '（不支持实验上下文）' : '（能力未确认）' : '' }}</option></template>
       </select></label>
       <label>思考 <select id="effort" aria-label="思考强度" :disabled="unavailable" :value="loading ? '' : desired?.effort || ''" :title="desired?.effort || '默认'" @change="change('effort', $event)">
-        <option v-if="loading" value="">{{ current ? '正在加载…' : '请先选择项目' }}</option><template v-else><option value="">默认</option><option v-for="e in model?.supportedReasoningEfforts || []" :key="e.reasoningEffort" :value="e.reasoningEffort">{{ e.reasoningEffort }}</option></template>
+        <option v-if="loading" value="">{{ current ? '正在加载…' : '请先选择项目' }}</option><template v-else><option value="">默认</option><option v-if="desired?.effort && !model?.supportedReasoningEfforts.some(e => e.reasoningEffort === desired?.effort)" :value="desired.effort">{{ desired.effort }}（当前配置）</option><option v-for="e in model?.supportedReasoningEfforts || []" :key="e.reasoningEffort" :value="e.reasoningEffort">{{ e.reasoningEffort }}</option></template>
       </select></label>
       <label>模式 <select id="mode" aria-label="模式" :disabled="unavailable" :value="loading ? '' : desired?.mode || 'default'" :title="desired?.mode === 'plan' ? 'Plan · 规划' : '普通 · 执行'" @change="change('mode', $event)">
         <option v-if="loading" value="">{{ current ? '正在加载…' : '请先选择项目' }}</option><option v-else-if="!catalog?.modes.length" value="">暂无可用选项</option><template v-else><option v-for="m in modes" :key="m.mode" :value="m.mode">{{ m.mode === 'plan' ? 'Plan · 规划' : '普通 · 执行' }}</option></template>
       </select></label>
+      <PermissionSelect v-if="current && !loading && viewerRoot()===viewerDocument().body" :key="current.hybrid?.activeSessionId || current.id" />
       <button v-if="current?.capabilities?.skills!==false" id="skills-button" type="button" class="quiet" :disabled="loading" :title="catalog?.errors.skills || '选择与管理 Skills'" @click="emit('skills')">Skills</button>
       <button v-if="current?.capabilities?.goals!==false" id="goal-button" type="button" class="quiet" :disabled="loading || draft?.goalSaving || store.state.connection !== '已连接'" @click="goalPanel?.show()">Goal</button>
     </div>
+    <p v-if="!loading && modelError" class="subtle" role="status">模型目录未完整加载，暂时无法确认部分模型能力。<button type="button" class="quiet" @click="store.loadControls()">重新加载模型</button></p>
     <p v-if="googlePlan" id="plan-mode-note" class="subtle" role="status">Plan 从下一轮发送生效：只读调查和规划，工具禁用网络；MCP、子代理和 Goal 续跑暂停。切回普通模式后可执行。</p>
     <GoalPanel v-if="current?.capabilities?.goals!==false" ref="goalPanel" />
-    <div v-if="current?.hybrid && draft?.uncertain" class="runtime-recovery" role="alert"><p>{{ current?.runtimeError || '上次执行结果未知，未自动重发。' }}</p><button type="button" class="quiet" :disabled="loading || draft.sending" @click="store.recoverExecution().catch(store.report)">核实执行状态</button></div>
+    <div v-if="draft?.uncertain" class="runtime-recovery" role="alert"><p>{{ current?.runtimeError || '上次执行结果未知，未自动重发。' }}</p><button type="button" class="quiet" :disabled="loading || draft.sending" @click="store.recoverExecution().catch(store.report)">确认未知结果并恢复</button></div>
     <div id="selected-skills"><button v-for="s in draft?.skills || []" :key="s.path" type="button" class="skill-chip" @click="store.toggleSkill(s, false)">${{ s.name }} ×</button></div>
     <details v-if="draft?.queued.length" id="queued-inputs" open>
       <summary>待接收消息 · {{ draft.queued.length }}</summary>

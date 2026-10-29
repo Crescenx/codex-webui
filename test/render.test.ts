@@ -1,7 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { renderMarkdown } from '../web/render.ts';
+import { renderMarkdown } from '../web/markdown.ts';
 import { checkMermaidSource, MAX_MERMAID_CHARS } from '../web/mermaid.ts';
+import { texDeclarations } from '../shared/tex-macros.ts';
+const mathDefinitions=Object.fromEntries(texDeclarations(String.raw`\newcommand{\norm}[1]{\left\lVert #1\right\rVert}
+\newcommand{\tr}{\operatorname{tr}}
+\newcommand{\rank}{\operatorname{rank}}
+\newcommand{\R}{\mathbb{R}}`).map(d=>[d.name,d.source]));
 
 test('cached blocks match fresh rendering as references, math, code and thread-owned images change', () => {
   const cache = new Map<string, string>();
@@ -135,6 +140,82 @@ test('display math after prose shields equation lines from Markdown headings', (
   }
 });
 
+test('Gemini dollar displays close beside TeX and leave following Markdown intact',()=>{
+  const formula=String.raw`$$\begin{aligned}
+\norm{M}_F &\le \norm{H}_F \\
+\norm{M}_2 &\le \sqrt{\tr(H^T H)}
+\end{aligned}$$`;
+  for(const prefix of ['', '> ', '- ']) {
+    const continuation=prefix==='- '?'  ':prefix;
+    const source=prefix+formula.replaceAll('\n','\n'+continuation)+'\n\n### 后续正文\n\n**正常强调**';
+    const r=renderMarkdown(source,undefined,undefined,{mathDefinitions});
+    assert.match(r.html,/katex-display/);assert.doesNotMatch(r.html,/katex-error|color:#cc0000/);
+    assert.match(r.html,/<h3>后续正文<\/h3>/);assert.match(r.html,/<strong>正常强调<\/strong>/);
+    assert.ok([...r.atoms.values()].some(raw=>raw.includes('\\end{aligned}$$')&&!raw.includes('后续正文')));
+  }
+  for(const source of ['$$x^2$$','$$\nx^2\n$$','正文 $$x^2$$ 尾部'])assert.match(renderMarkdown(source).html,/katex-display/);
+  for(const source of ['$$$\nx^2\n$$$', '$x^2$', String.raw`$$\text{cost: \$5}$$`]) {
+    const r=renderMarkdown(source);assert.match(r.html,/class="katex"/);assert.doesNotMatch(r.html,/katex-error/);
+    assert.ok([...r.atoms.values()].includes(source));
+  }
+  for(const source of ['`$$x$$`','```tex\n'+formula+'\n```',String.raw`\$\$x\$\$`])assert.doesNotMatch(renderMarkdown(source).html,/class="katex"/);
+  for(let end=2;end<formula.length;end++)assert.doesNotThrow(()=>renderMarkdown(formula.slice(0,end)));
+  assert.ok([...renderMarkdown(formula).atoms.values()].includes(formula));
+});
+test('document macros render, respect explicit definitions and stay within a message',()=>{
+  const source=String.raw`$\norm{A}_2,\rank(A),\tr(A),\R^n$`;
+  const render=(text:string,cache=new Map<string,string>())=>renderMarkdown(text,undefined,cache,{mathDefinitions});
+  const expected=render(source).html;
+  assert.doesNotMatch(expected,/katex-error|math-unresolved|color:#cc0000/);
+  const scoped=String.raw`$\gdef\Local{z}$`+'\n\n'+String.raw`$\Local^2$`;
+  const cache=new Map<string,string>();
+  assert.equal(render(scoped,cache).html,render(scoped,cache).html);
+  assert.doesNotMatch(render(scoped).html,/math-unresolved/);
+  assert.match(render(String.raw`$\Local$`).html,/math-unresolved/);
+  const local=render(String.raw`$\newcommand{\norm}[1]{#1^3}\norm{x}$`+'\n\n'+source).html;
+  assert.doesNotMatch(local,/math-unresolved/);assert.match(local,/<mn>3<\/mn>/);
+  assert.equal(render(source).html,expected);
+  assert.match(renderMarkdown(source).html,/math-unresolved/);
+});
+test('undefined macros retain formula source instead of inventing an expansion',()=>{
+  for(const name of ['Null','Col','SomeFutureOperator']) {
+    const source='$\\'+name+'(B) + \\'+name+String.raw`{x}{y} + \frac{1}{2}$`;
+    const r=renderMarkdown(source);
+    assert.doesNotMatch(r.html,/katex-error|color:#cc0000/);
+    assert.match(r.html,/math-unresolved/);
+    assert.ok(r.html.includes(source.slice(1,-1)));
+    assert.ok([...r.atoms.values()].includes(source));
+    assert.equal(renderMarkdown(source,undefined,new Map()).html,r.html);
+  }
+  const defined=renderMarkdown(String.raw`$\newcommand{\Col}{\mathcal{C}}\Col(B)$`).html;
+  assert.doesNotMatch(defined,/未定义|katex-error|color:#cc0000/);
+  assert.match(defined,/mathvariant="script">C/);
+  assert.doesNotMatch(renderMarkdown('$x+1$').html,/未定义/);
+  assert.doesNotMatch(renderMarkdown('`\\Null(B)`').html,/katex|未定义/);
+  assert.match(renderMarkdown(String.raw`$\Unknown + \frac{1}{$`).html,/math-unresolved/);
+  assert.doesNotMatch(renderMarkdown(String.raw`$\Unknown + \href{javascript:alert(1)}{x}$`).html,/href="javascript:/);
+});
+test('math context invalidates block caches and preserves declaration arguments and dependencies',()=>{
+  const source=String.raw`$\Col(A),\applyCol{B},\pair{x}{y}$`;
+  const definitions=(symbol:string)=>Object.fromEntries(texDeclarations(String.raw`\newcommand{\Col}{\mathcal{`+symbol+String.raw`}}
+\newcommand{\applyCol}[1]{\Col(#1)}
+\def\pair#1#2{\langle #1,#2\rangle}`).map(d=>[d.name,d.source]));
+  const cache=new Map<string,string>();
+  const first=renderMarkdown(source,undefined,cache,{mathDefinitions:definitions('C')}).html;
+  assert.doesNotMatch(first,/math-unresolved/);assert.match(first,/mathvariant="script">C/);
+  const second=renderMarkdown(source,undefined,cache,{mathDefinitions:definitions('D')}).html;
+  assert.match(second,/mathvariant="script">D/);
+  assert.equal(second,renderMarkdown(source,undefined,undefined,{mathDefinitions:definitions('D')}).html);
+  assert.match(renderMarkdown(source,undefined,cache).html,/math-unresolved/);
+  const setup={mathDefinitions:{'\\setup':String.raw`\newcommand{\setup}{\gdef\Local{z}}`}};
+  const prefix=String.raw`$\setup$`+'\n\n'+String.raw`$\Local^2$`;
+  renderMarkdown(prefix,undefined,cache,setup);
+  assert.equal(renderMarkdown(prefix+'\n\n'+String.raw`$\Local^3$`,undefined,cache,setup).html,renderMarkdown(prefix+'\n\n'+String.raw`$\Local^3$`,undefined,undefined,setup).html);
+  assert.doesNotMatch(renderMarkdown(String.raw`$\bad$`,undefined,undefined,{mathDefinitions:{'\\bad':String.raw`\def\bad{\bad}`}}).html,/<script|href=/);
+  const builtIn=String.raw`$\sin(x)$`;
+  assert.equal(renderMarkdown(builtIn,undefined,undefined,{mathDefinitions:{'\\sin':String.raw`\def\sin{0}`}}).html,renderMarkdown(builtIn).html);
+  assert.match(renderMarkdown(String.raw`$\optional$`,undefined,undefined,{mathDefinitions:{'\\optional':String.raw`\newcommand{\optional}[1][x]{y}`}}).html,/math-unresolved/);
+});
 test('bracket delimiters do not alter code, URLs, ordinary escapes or incomplete streaming math',()=>{
   const literals=[String.raw`\[x\]`,String.raw`\(x\)`];
   for(const literal of literals)for(const code of ['`'+literal+'`','```python\n'+literal+'\n```','    '+literal]) {

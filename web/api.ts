@@ -2,6 +2,7 @@ import type { ReferenceCapabilities } from "../shared/references.ts";
 import type { Model, Notice, PendingRequest, Skill, Thread } from '../shared/protocol.ts';
 import type { RuntimeCapabilities } from '../shared/runtime.ts';
 
+export type PermissionSettings = { mode: 'auto' | 'manual' | 'bypass' | null; approvalsReviewer: 'user' | 'auto_review'; effectiveOn: 'nextTurn'; defaultMode?:'auto'|'manual' };
 export type Attachment = { id: string; name: string; mime: string; size: number };
 export type Catalog = { capabilities?: Partial<RuntimeCapabilities> & { references?: ReferenceCapabilities }; models: Model[]; modes: { mode: string; name: string }[]; skills: Skill[]; errors: Record<string, string>; skillErrors: unknown[] };
 export type Snapshot = { thread: Thread; requests: PendingRequest[]; uncertain?: boolean; seq: number };
@@ -36,8 +37,8 @@ export function createClient() {
     } finally { pending.delete(controller); }
   }
   return {
-    request<T>(path: string, data?: unknown, signal?: AbortSignal) {
-      return request<T>(path, data === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }, signal);
+    request<T>(path: string, data?: unknown, signal?: AbortSignal, method: 'POST' | 'PUT' = 'POST') {
+      return request<T>(path, data === undefined ? {} : { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }, signal);
     },
     upload(file: File) {
       return request<Attachment>('/attachments?name=' + encodeURIComponent(file.name), { method: 'POST', body: file, headers: { 'Content-Type': 'application/octet-stream' } });

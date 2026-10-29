@@ -1,33 +1,44 @@
 <script setup lang="ts">
-import { viewerDocument, viewerWindow, viewerRoot } from '../environment.ts';
+import { viewerDocument, viewerWindow } from '../environment.ts';
 
 import { inject, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { renderInto, renderMarkdown } from '../render.ts';
+import { clearRendered, renderInto } from '../render.ts';
+import { cancelMarkdown, markdownContextKey, renderMarkdownAsync } from '../markdown-client.ts';
 import { mermaidKey, type DiagramView } from '../mermaid.ts';
 import { transcriptMemoryKey } from '../transcript.ts';
-const props = defineProps<{ source: string; markdown: boolean; threadId?: string; itemKey?: string; complete?: boolean }>();
-const emit = defineEmits<{ copy: [text: string]; layout: [] }>();
+import type { MathDefinitions } from '../../shared/tex-macros.ts';
+const props = defineProps<{ source: string; markdown: boolean; threadId?: string; itemKey?: string; complete?: boolean; mathDefinitions?: MathDefinitions }>();
+const emit = defineEmits<{ copy: [text: string]; layout: [element?: HTMLElement] }>();
 const body = ref<HTMLElement>();
+const painted = ref(false);
 const mermaid = inject(mermaidKey)!;
 const memory = inject(transcriptMemoryKey);
 const diagrams = new Map<string, DiagramView>();
-const cache = new Map<string, string>();
-let timer: ReturnType<typeof setTimeout> | undefined, nextRenderAt = 0, pending = false;
-function clear() { clearTimeout(timer); timer = undefined; cache.clear(); for (const view of diagrams.values()) view.dispose(); diagrams.clear(); }
+const owner=crypto.randomUUID();
+let timer: ReturnType<typeof setTimeout> | undefined, nextRenderAt = 0, pending = false, rendering=false, generation=0, disposed=false;
+function clear() { generation++;cancelMarkdown(owner);clearTimeout(timer); timer = undefined;if(body.value)clearRendered(body.value);for (const view of diagrams.values()) view.dispose(); diagrams.clear(); }
 watch(() => props.threadId, clear);
-function paint() {
+function selecting(){const selection=viewerWindow().getSelection();return !!(selection&&!selection.isCollapsed&&selection.anchorNode&&body.value?.closest('.conversation')?.contains(selection.anchorNode));}
+async function paint() {
   timer = undefined;
-  if (!body.value) return;
-  const selection = viewerWindow().getSelection();
-  if (selection && !selection.isCollapsed && selection.anchorNode && body.value.closest('.conversation')?.contains(selection.anchorNode)) return;
+  if (!body.value||disposed||rendering||selecting()) return;
   pending = false;
-  if (!props.markdown) { clear(); body.value.textContent = props.source; emit('layout'); return; }
-  const startedAt = performance.now();
-  const rendered = memory && props.itemKey ? memory.render(props.itemKey, props.source, props.threadId, cache, !!props.complete) : renderMarkdown(props.source, props.threadId, cache);
+  if (!props.markdown) { clear(); body.value.textContent = props.source; painted.value=true; emit('layout', body.value); return; }
+  rendering=true;
+  const version=generation,source=props.source,threadId=props.threadId,complete=!!props.complete;
+  const current=()=>!disposed&&generation===version&&!selecting();
+  try{
+  const key=JSON.stringify([threadId,props.itemKey||owner,markdownContextKey(props.mathDefinitions)]);
+  const load=()=>renderMarkdownAsync(owner,source,threadId,props.mathDefinitions);
+  const rendered = memory ? await memory.render(key,source,load,complete) : await load();
+  if(!current()){if(!disposed)pending=true;return;}
+  body.value.removeAttribute('title');
+  const startedAt=performance.now();
   for (const [id, view] of diagrams) {
     if (!rendered.diagrams.some(block => block.id === id && block.source === view.source)) { view.dispose(); diagrams.delete(id); }
   }
-  renderInto(body.value, rendered, new Map([...diagrams].map(([id, view]) => [id, view.element])));
+  if(!await renderInto(body.value, rendered, new Map([...diagrams].map(([id, view]) => [id, view.element])),current)){if(!disposed)pending=true;return;}
+  painted.value=true;
   for (const block of rendered.diagrams) {
     let view = diagrams.get(block.id);
     if (!view) {
@@ -37,25 +48,28 @@ function paint() {
     view.update(block.closed || !!props.complete);
   }
   for (const pre of body.value.querySelectorAll('pre:not(.mermaid-block pre)')) {
+    if(pre.querySelector('.code-toolbar'))continue;
     const code = pre.querySelector('code'); if (!code) continue;
     const toolbar = viewerDocument().createElement('div'); toolbar.className = 'code-toolbar'; toolbar.dataset.copyIgnore = '';
     const language = viewerDocument().createElement('span'); language.textContent = [...code.classList].find(c => c.startsWith('language-'))?.slice(9) || '代码';
     const button = viewerDocument().createElement('button'); button.type = 'button'; button.className = 'code-copy quiet'; button.textContent = '复制代码'; button.onclick = () => emit('copy', code.textContent || '');
     toolbar.append(language, button); pre.prepend(toolbar);
   }
-  if (props.complete) cache.clear();
   // Leave input/scrolling time between expensive long-message paints.
   nextRenderAt = performance.now() + Math.max(100, (performance.now() - startedAt) * 2);
-  emit('layout');
+  emit('layout', body.value);
+  }catch(error){
+    if(current()&&body.value){clear();body.value.textContent=source;body.value.title='Markdown 渲染失败：'+String(error);painted.value=true;emit('layout', body.value);}
+  }finally{rendering=false;if(pending&&!disposed)schedule();}
 }
 function schedule() {
-  if (!pending) return;
+  if (!pending||rendering||disposed) return;
   clearTimeout(timer);
   const wait = props.complete || !props.markdown ? 0 : nextRenderAt - performance.now();
-  if (wait <= 0) paint(); else timer = setTimeout(paint, wait);
+  if (wait <= 0) void paint(); else timer = setTimeout(()=>void paint(), wait);
 }
-watch([body, () => props.source, () => props.markdown, () => props.threadId, () => props.complete], () => { pending = true; schedule(); }, { flush: 'post' });
+watch([body, () => props.source, () => props.markdown, () => props.threadId, () => props.itemKey, () => props.complete, () => markdownContextKey(props.mathDefinitions)], () => { generation++;pending = true; schedule(); }, { flush: 'post' });
 onMounted(() => viewerDocument().addEventListener('selectionchange', schedule));
-onBeforeUnmount(() => { clear(); viewerDocument().removeEventListener('selectionchange', schedule); });
+onBeforeUnmount(() => { disposed=true;clear(); viewerDocument().removeEventListener('selectionchange', schedule); });
 </script>
-<template><div ref="body" class="markdown"></div></template>
+<template><div ref="body" class="markdown" :data-layout-pending="markdown && !painted ? '' : undefined"></div></template>

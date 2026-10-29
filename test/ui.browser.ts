@@ -7,7 +7,7 @@ import { AppServer } from '../server/adapter.ts';
 
 async function keyboardFocus(page:Page) {
   await page.locator('#conversation').focus();
-  for (const id of ['model','effort','mode','skills-button','goal-button','prompt']) {
+  for (const id of ['model','effort','mode','approval-mode','skills-button','goal-button','prompt']) {
     await page.keyboard.press('Tab');
     const target=page.locator('#'+id);
     await expect(target).toBeFocused();
@@ -20,7 +20,7 @@ async function keyboardFocus(page:Page) {
     await expect(target).toHaveCSS('outline-style','solid');
     await expect(target).toHaveCSS('outline-width','2px');
     await expect(target).toHaveCSS('outline-color','rgb(217, 189, 145)');
-    if (['model','effort','mode'].includes(id)) {
+    if (['model','effort','mode','approval-mode'].includes(id)) {
       await target.hover();
       await expect(target).toHaveCSS('border-top-color','rgb(217, 189, 145)');
     }
@@ -337,6 +337,7 @@ test('bracket math streams, renders and copies its exact original source',async(
     await expect(reply.locator('p').first()).toHaveCSS('font-size','17px');
     await expect(reply.locator('p').first()).toHaveCSS('font-family', /Constantia.*serif/);
     await reply.scrollIntoViewIfNeeded();await page.screenshot({path:'test-results/viewer-equation-heading-fix.png'});
+
   }finally{await app.stop();await rm(dir,{recursive:true,force:true});}
 });
 
@@ -463,7 +464,7 @@ for (const width of [1280,1920]) test(`long content, streaming and manual readin
     await page.screenshot({path:`test-results/viewer-home-${width}.png`,fullPage:true});
     await page.route('**/api/controls?*',async route=>{
       const response=await route.fetch();const data=await response.json();
-      data.models[0].displayName='模型-'+ 'long-model-name-'.repeat(8);
+      if(data.models.length)data.models[0].displayName='模型-'+ 'long-model-name-'.repeat(8);
       data.skills=Array.from({length:24},(_,i)=>({...data.skills[0],name:i===0?'超长技能-'+ 'long-skill-name-'.repeat(14):`阅读辅助 Skill ${i}`,path:`/mock/skills/${i}/SKILL.md`,description:'中文与 English 混排说明，保留全局开关和本轮选择的区别。'+ 'long-description-'.repeat(6)}));
       await route.fulfill({response,json:data});
     });
@@ -545,4 +546,60 @@ for (const width of [1280,1920]) test(`long content, streaming and manual readin
     await expect(output.locator('[data-reuse-check]')).toHaveCount(1);
     await page.screenshot({path:`test-results/viewer-output-stream-${width}.png`,fullPage:true});
   } finally {await app.stop();await rm(dir,{recursive:true,force:true});}
+});
+
+
+test('Gemini dollar math renders without consuming later prose',async({page})=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),'viewer-gemini-math-'));
+  const adapter=new AppServer({command:process.execPath,args:[path.resolve('test/fake-codex.ts')]});
+  const app=await serve({roots:[dir],dataDir:path.join(dir,'data'),runtimeDir:path.join(dir,'run'),port:0,antigravity:false,adapter});
+  try {
+    await page.goto(app.launchUrl);await page.locator('#welcome-new').click();await page.getByRole('button',{name:'▱ '+dir,exact:true}).click();await page.locator('#folder-select').click();
+    const gemini=String.raw`$\rank(M)=1, M\in\R^n, \Col(Q_2)=\Null(B), \FutureOperator(B)$
+
+$$\begin{aligned}
+\norm{M}_F &\le \norm{H}_F \\
+\norm{M}_2 &\le \sqrt{\tr(H^T H)}
+\end{aligned}$$
+
+### 后续正文
+
+**正常强调**`;
+    await expect(page.locator('#send')).toBeEnabled();
+    const threadId=new URL(page.url()).hash.slice(1);
+    const material=String.raw`\newcommand{\rank}{\operatorname{rank}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\Col}{\mathcal{C}}
+\newcommand{\Null}{\mathcal{N}}
+\newcommand{\norm}[1]{\left\lVert #1\right\rVert}
+\newcommand{\tr}{\operatorname{tr}}
+\newcommand{\FutureOperator}{\operatorname{FutureOperator}}`;
+    await adapter.call('mock/turn',{threadId,items:[
+      {id:'material',type:'dynamicToolCall',status:'completed',success:true,result:{summary:material}},
+      {id:'gemini',type:'agentMessage',text:gemini},
+    ]});
+    const repaired=page.locator('.assistant .markdown').last();
+    await expect(repaired.locator('.katex')).toHaveCount(2);
+    await expect(repaired.locator('.katex-display')).toHaveCount(1);
+    await expect(repaired.locator('mi[mathvariant="script"]').filter({hasText:/^[CN]$/})).toHaveCount(2);
+    await expect(repaired.locator('.math-unresolved, .katex-error, [style*="color: rgb(204, 0, 0)"], [style*="color:#cc0000"]')).toHaveCount(0);
+    await expect(repaired.locator('h3')).toHaveText('后续正文');
+    await expect(repaired.locator('strong')).toHaveText('正常强调');
+    await repaired.scrollIntoViewIfNeeded();await page.screenshot({path:'test-results/viewer-gemini-math.png'});
+    const copied=await repaired.locator('.katex-display').evaluate(el=>{
+      const range=document.createRange();range.selectNodeContents(el);const selection=window.getSelection()!;selection.removeAllRanges();selection.addRange(range);
+      const data=new DataTransfer();el.dispatchEvent(new ClipboardEvent('copy',{bubbles:true,clipboardData:data}));return data.getData('text/plain');
+    });
+    expect(copied).toBe(gemini.slice(gemini.indexOf('$$'),gemini.lastIndexOf('$$')+2));
+    await page.evaluate(()=>window.getSelection()?.removeAllRanges());
+    await adapter.call('mock/turn',{threadId,items:[
+      {id:'later-material',type:'commandExecution',status:'completed',exitCode:0,aggregatedOutput:String.raw`\newcommand{\Null}{\mathcal{Z}}`},
+      {id:'later-answer',type:'agentMessage',text:String.raw`$\Null(B)$`},
+    ]});
+    await expect(page.locator('.assistant .markdown').last().locator('mi[mathvariant="script"]')).toHaveText(['Z']);
+    await expect(page.locator('.assistant .markdown').first().locator('mi[mathvariant="script"]').filter({hasText:'N'})).toHaveCount(1);
+    await page.reload();
+    await expect(page.locator('.assistant .markdown').last().locator('mi[mathvariant="script"]')).toHaveText(['Z']);
+    await expect(page.locator('.assistant .math-unresolved')).toHaveCount(0);
+  }finally{await app.stop();await rm(dir,{recursive:true,force:true});}
 });

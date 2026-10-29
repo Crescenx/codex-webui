@@ -1,0 +1,45 @@
+import {chromium} from '@playwright/test';
+import assert from 'node:assert/strict';
+import {pathToFileURL} from 'node:url';
+import path from 'node:path';
+import fs from 'node:fs';
+const browser=await chromium.launch({channel:'chromium',headless:true});
+try{
+ const page=await browser.newPage({viewport:{width:1920,height:1080}}),errors=[],requests=[];
+ page.on('pageerror',e=>errors.push(e.message));
+ page.on('request',r=>{if(/^https?:/.test(r.url()))requests.push(r.url());});
+ await page.goto(pathToFileURL(path.join(import.meta.dirname,'index.html')).href);
+ assert.equal(await page.locator('[data-node]').count(),23);
+ await page.locator('[data-node="http"]').click();
+ assert.match(await page.locator('#detail').innerText(),/双向 hooks/);
+ const before=await page.locator('#zoom').innerText();await page.locator('#in').click();
+ assert.notEqual(await page.locator('#zoom').innerText(),before);
+ for(let i=0;i<5;i++)await page.locator('#in').click();
+ const v=page.locator('#viewport'),box=await v.boundingBox();
+ await v.evaluate(el=>{el.scrollLeft=200;el.scrollTop=200;});
+ const start=await v.evaluate(el=>({x:el.scrollLeft,y:el.scrollTop}));
+ const point=await v.evaluate(el=>{const r=el.getBoundingClientRect();for(let y=20;y<180;y+=20)for(let x=20;x<300;x+=20)if(!document.elementFromPoint(r.x+x,r.y+y)?.closest('[data-node]'))return {x:r.x+x,y:r.y+y};throw Error('No blank canvas point');});
+ await page.mouse.move(point.x,point.y);await page.mouse.down();await page.mouse.move(point.x+100,point.y+80,{steps:5});await page.mouse.up();
+ const end=await v.evaluate(el=>({x:el.scrollLeft,y:el.scrollTop}));
+ assert(end.x<start.x&&end.y<start.y,'drag pans both axes');
+ await page.locator('#search').fill('reduceNotice');
+ await page.locator('#catalog [data-id="shared/protocol.ts"]').click();
+ assert.match(await page.locator('#detail').innerText(),/被谁依赖/);
+ assert(await page.locator('[data-node]').count()>10);
+ await page.locator('#search').fill('markdown-client');
+ await page.locator('#catalog [data-id="web/markdown-client.ts"]').click();
+ assert(await page.locator('[data-node="web/markdown.worker.ts"]').count()===1,'worker alias resolves');
+ await page.locator('[data-mode="runtime"]').click();
+ await page.locator('[data-node="hybrid"]').dblclick();
+ assert.equal(await page.locator('[data-node="server/hybrid.ts"]').count(),1);
+ await page.locator('[data-mode="flows"]').click();
+ for(let i=0;i<6;i++){await page.locator('#flow').selectOption(String(i));assert(await page.locator('.step').count()>=4);}
+ await v.focus();const keyBefore=await page.locator('#zoom').innerText();await page.keyboard.press('+');assert.notEqual(await page.locator('#zoom').innerText(),keyBefore);
+ await page.locator('[data-mode="runtime"]').click();await page.locator('#reset').click();
+ fs.mkdirSync(path.join(import.meta.dirname,'../../.tmp/architecture'),{recursive:true});
+ await page.screenshot({path:path.join(import.meta.dirname,'../../.tmp/architecture/overview.png')});
+ await page.locator('[data-node="http"]').click();
+ await page.screenshot({path:path.join(import.meta.dirname,'../../.tmp/architecture/selected.png')});
+ assert.deepEqual(errors,[]);assert.deepEqual(requests,[],'standalone page must remain offline');
+ console.log('PASS: overview, details, zoom, two-axis drag, search, file neighbors, worker alias, drill-down, six flows, keyboard, offline, console.');
+}finally{await browser.close();}

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import DefaultPermissions from './DefaultPermissions.vue';
 import DeleteThreadDialog from './DeleteThreadDialog.vue';
 import { threadTitle, useViewer } from '../store.ts';
 import { inWorkspace, workspacePath } from '../workspace-path.ts';
@@ -109,7 +110,7 @@ async function notifications() { if ('Notification' in window) store.toast(await
         <button id="more" class="quiet" :hidden="!store.state.cursor" :disabled="loading || store.state.listLoading || store.state.moreLoading || store.state.authExpired" @click="loadMore()">{{ loading || store.state.moreLoading ? '加载中…' : store.state.listError ? '重试加载' : flat || scope ? '加载更早会话' : '加载更多项目与会话' }}</button>
       </div>
     </nav>
-    <footer><span id="connection" role="status">{{ store.state.connection }}</span><details v-if="!flat" class="sidebar-more"><summary>更多操作</summary><div><button id="refresh" class="quiet" @click="store.resync()">刷新会话</button><button id="notifications" class="quiet" @click="notifications">开启通知</button><button v-if="!embedded" id="restart-backend" class="quiet" :disabled="store.state.restarting || store.state.restartPending" title="重启 Viewer 和 Codex，随后自动刷新页面；保留当前对话、草稿和附件，运行中的任务须先结束" @click="store.restartBackend()">{{ store.state.restarting || store.state.restartPending ? '正在重启…' : '重启整个后端' }}</button></div></details></footer>
+    <footer><span id="connection" role="status">{{ store.state.connection }}</span><details v-if="!flat" class="sidebar-more"><summary>更多操作</summary><div><DefaultPermissions v-if="!embedded"/><button id="refresh" class="quiet" @click="store.resync()">刷新会话</button><button id="notifications" class="quiet" @click="notifications">开启通知</button><button v-if="!embedded" id="restart-backend" class="quiet" :disabled="store.state.restarting || store.state.restartPending" title="重启 Viewer 和 Codex，随后自动刷新页面；保留当前对话、草稿和附件，运行中的任务须先结束" @click="store.restartBackend()">{{ store.state.restarting || store.state.restartPending ? '正在重启…' : '重启整个后端' }}</button></div></details></footer>
     <slot />
     <DeleteThreadDialog ref="deletion"/>
   </aside>

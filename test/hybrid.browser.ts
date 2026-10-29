@@ -23,6 +23,11 @@ test('Codex delegated tasks and native children share the existing panel',async(
     await expect(page.locator('[data-agent-id="native-child"]')).toBeVisible();
     await page.locator(`[data-agent-id="${child}"]`).click();
     await expect(page.locator('.agent-detail')).toContainText('你好 world');
+    await page.locator('#agents-toggle').click();
+    const trace=page.locator('#conversation .trace-toggle').last();
+    if(await trace.count() && await trace.getAttribute('aria-expanded')==='false')await trace.click();
+    await expect(page.locator('#conversation .activity').filter({hasText:'子代理结果'})).toHaveCount(1);
+    await expect(page.locator('#prompt')).toHaveValue('preserved draft');
     await page.screenshot({path:'test-results/hybrid-desktop.png'});
   }finally{await app.stop();await rm(dir,{recursive:true,force:true});}
 });

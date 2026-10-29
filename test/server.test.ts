@@ -36,6 +36,27 @@ test('authentication renews both deadlines on access, but never revives an expir
   } finally { t.mock.restoreAll(); await app.stop(); await rm(dir, { recursive: true, force: true }); }
 });
 
+test('native disconnect invalidates the cached running turn and pending approvals', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'viewer-disconnect-'));
+  const adapter = new AppServer({ command: process.execPath, args: [path.resolve('test/fake-codex.ts')] });
+  const app = await serve({ roots: [dir], dataDir: dir + '/data', runtimeDir: dir + '/run', port: 0, adapter });
+  try {
+    const cookie = (await fetch(app.launchUrl, { redirect: 'manual' })).headers.get('set-cookie')!.split(';')[0];
+    const created = await fetch(app.origin + '/api/threads', { method: 'POST', headers: { cookie, origin: app.origin, 'content-type': 'application/json' }, body: JSON.stringify({ cwd: dir }) });
+    const { thread } = await created.json();
+    adapter.emit('notice', { method: 'turn/started', params: { threadId: thread.id, turn: { id: 'running', status: 'inProgress', items: [] } } });
+    adapter.emit('request', { id: 'approval', method: 'item/commandExecution/requestApproval', params: { threadId: thread.id, turnId: 'running', command: 'pwd' } });
+    adapter.emit('notice', { method: 'thread/disconnected', params: { threadId: thread.id, status: 'unknown', error: 'stream closed' } });
+    const response = await fetch(app.origin + '/api/threads/' + thread.id, { headers: { cookie } });
+    const snapshot = await response.json();
+    assert.equal(snapshot.thread.status.type, 'systemError');
+    assert.equal(snapshot.thread.executionUncertain, true);
+    assert.equal(snapshot.thread.turns.at(-1).status, 'failed');
+    assert.match(snapshot.thread.runtimeError, /stream closed/);
+    assert.deepEqual(snapshot.requests, []);
+  } finally { await app.stop(); await rm(dir, { recursive: true, force: true }); }
+});
+
 test('late turn/start cannot undo completion; Windows access is flagged', () => {
   const t: Thread = { id:'t',cwd:'/tmp',turns:[{id:'a',status:'completed',items:[]}],status:{type:'idle'} };
   reduceNotice(t,{method:'turn/started',params:{threadId:'t',turn:{id:'a',status:'inProgress',items:[]}}});

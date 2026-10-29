@@ -4,17 +4,17 @@ import type { DeepReadonly, InjectionKey } from 'vue';
 import { messageReceived, mergeThreadMetadata, reduceNotice, threadTitle, usageFrom, goalLabels } from '../shared/protocol.ts';
 import type { GoalUpdate, Item, NewThreadOptions, PendingRequest, Settings, Skill, Thread, Turn, Usage, UsageResetOutcome } from '../shared/protocol.ts';
 import { createClient } from './api.ts';
-import type { Attachment, Catalog, Directories, Preview, Snapshot, Update } from './api.ts';
+import type { PermissionSettings, Attachment, Catalog, Directories, Preview, Snapshot, Update } from './api.ts';
 import type { Watchdog, WatchdogConfig, WatchdogRun } from '../shared/watchdogs.ts';
 import { agentTree, mergeAgentHistory } from '../shared/agents.ts';
 import type { Obj } from '../shared/protocol.ts';
 import type { ConversationReference, ReferenceData, ReferencePosition } from '../shared/references.ts';
-import { runtimeOf, runtimeName } from '../shared/runtime.ts';
+import { runtimeOf, runtimeName, runtimeForModel } from '../shared/runtime.ts';
 import type { RuntimeId, RuntimeState } from '../shared/runtime.ts';
 
 const emptyCatalog = (): Catalog => ({ models: [], modes: [], skills: [], errors: {}, skillErrors: [] });
 type QueuedMessage = { id: string; turnId: string; text: string; attachments: Attachment[]; skills: Skill[]; references?: ConversationReference[]; forwardedAs?: string[] };
-type Draft = { text: string; attachments: Attachment[]; skills: Skill[]; references: ConversationReference[]; referenceSubmission?: {id:string;signature:string}; queued: QueuedMessage[]; answers: Record<string, string[]>; desired?: Settings; dirty: boolean; catalog: Catalog; loading: boolean; sending: boolean; stopping: boolean; uploading: boolean; goalSaving: boolean; uncertain: boolean; error: string; readError: string };
+type Draft = { text: string; attachments: Attachment[]; skills: Skill[]; references: ConversationReference[]; referenceSubmission?: {id:string;signature:string}; queued: QueuedMessage[]; answers: Record<string, string[]>; desired?: Settings; dirty: boolean; catalog: Catalog; loading: boolean; extrasLoading: boolean; sending: boolean; stopping: boolean; uploading: boolean; goalSaving: boolean; uncertain: boolean; error: string; readError: string };
 type ReloadDraft = Pick<Draft, 'text' | 'attachments' | 'skills' | 'references' | 'referenceSubmission' | 'queued' | 'answers' | 'desired' | 'dirty' | 'uncertain'>;
 const reloadKey = 'viewer-restart-drafts-v1';
 const message = (e: unknown) => e instanceof Error ? e.message : String(e);
@@ -29,7 +29,7 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
     drafts: {} as Record<string, Draft>, requests: {} as Record<string, PendingRequest>, replying: {} as Record<string, boolean>,
     read: read<Record<string, number>>('viewer-read', {}), collapsed: read<Record<string, boolean>>('viewer-projects', {}),
     connection: '连接中', restarting: false, restartPending: false, authExpired: false, error: '', toast: '',
-    runtimes: [] as RuntimeState[],
+    runtimes: [] as RuntimeState[], permissionSaving: '', permissionRevision:0,
     listLoading: false, moreLoading: false, listError: '',
     usage: { weekly: null, resetCount: null } as Usage, usageError: '', usageResetPending: false, usageResetKey: read<string>('viewer-usage-reset-key', ''),
     watchdogs: [] as Watchdog[], watchdogError: '', watchdogTimeZone: '', targetTurn: '', targetItem: '',
@@ -75,7 +75,7 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
     if (!state.drafts[id]) {
       const desired = read<Settings | undefined>('viewer-settings:' + id, undefined);
       let text = ''; try { text = storage.getItem('viewer-draft:' + id) || ''; } catch {}
-      state.drafts[id] = { text, attachments: [], skills: [], references: read<ConversationReference[]>('viewer-references:' + id, []), referenceSubmission: read('viewer-reference-submission:' + id, undefined), queued: read<QueuedMessage[]>('viewer-queued:' + id, []), answers: read<Record<string, string[]>>('viewer-answers:' + id, {}), desired, dirty: !!desired, catalog: emptyCatalog(), loading: false, sending: false, stopping: false, uploading: false, goalSaving: false, uncertain: false, error: '', readError: '' };
+      state.drafts[id] = { text, attachments: [], skills: [], references: read<ConversationReference[]>('viewer-references:' + id, []), referenceSubmission: read('viewer-reference-submission:' + id, undefined), queued: read<QueuedMessage[]>('viewer-queued:' + id, []), answers: read<Record<string, string[]>>('viewer-answers:' + id, {}), desired, dirty: !!desired, catalog: emptyCatalog(), loading: false, extrasLoading: false, sending: false, stopping: false, uploading: false, goalSaving: false, uncertain: false, error: '', readError: '' };
     }
     return state.drafts[id];
   }
@@ -107,7 +107,7 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
   });
   const canSend = computed(() => {
     const d = draft.value;
-    if (!current.value || current.value.hybrid?.locked || !d || state.authExpired || state.restarting || state.restartPending || state.hydrating || d.readError || d.sending || d.stopping || d.uploading || d.goalSaving || d.uncertain) return false;
+    if (state.permissionSaving===state.currentId || !current.value || current.value.readOnly || current.value.hybrid?.locked || !d || state.authExpired || state.restarting || state.restartPending || state.hydrating || d.readError || d.sending || d.stopping || d.uploading || d.goalSaving || d.uncertain) return false;
     const runtime=state.runtimes.find(r=>r.id===runtimeOf(current.value));
     if(runtime && !runtime.online)return false;
     if (active.value) return current.value.capabilities?.steer!==false && !!activeTurn.value;
@@ -137,7 +137,8 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
     if (notified.has(id)) return; notified.add(id);
     if (typeof Notification !== 'undefined' && Notification.permission === 'granted' && viewerDocument().hidden) new Notification(text, { icon: new URL('./assets/icon.png', import.meta.url).href });
   }
-  function status(t: DeepReadonly<Pick<Thread, 'id' | 'status' | 'turns' | 'updatedAt'>>): [string, string] {
+  function status(t: DeepReadonly<Pick<Thread, 'id' | 'status' | 'turns' | 'updatedAt' | 'autoReviewFailure'>>): [string, string] {
+    if(t.autoReviewFailure)return ['attention','自动审批待处理'];
     if (t.status?.activeFlags?.some(f => /waiting/.test(f)) || Object.values(state.requests).some(r => r.params.threadId === t.id)) return ['attention', '等待输入'];
     if (t.status?.type === 'active') return ['running', '进行中'];
     if (t.status?.type === 'systemError' || t.turns?.at(-1)?.status === 'failed') return ['failed', '失败'];
@@ -263,7 +264,8 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
   function refreshAgents() {
     if (!state.agentsVisible || state.restarting || state.connection !== '已连接' || (typeof document !== 'undefined' && viewerDocument().hidden)) return;
     if (current.value?.status?.type === 'active' || selectedAgent.value?.turns?.at(-1)?.status === 'inProgress' || agents.value.some(a => ['running', 'pendingInit', 'waiting'].includes(a.state))) {
-      void loadSubagents(); void loadAgent();
+      void loadSubagents();
+      if (selectedAgent.value?.status?.type === 'active' || selectedAgent.value?.turns?.at(-1)?.status === 'inProgress') void loadAgent();
     }
   }
   function refreshUsage() { if (typeof document === 'undefined' || !viewerDocument().hidden) void loadUsage(); }
@@ -289,12 +291,36 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
     if (draft.value?.uncertain) await openThread(state.currentId);
   }
   async function jumpToRun(run: Pick<WatchdogRun,'threadId'|'turnId'>) {await selectThread(run.threadId);if(state.currentId===run.threadId)state.targetTurn=run.turnId || '';}
-  async function loadControls(id = state.currentId) {
-    if (!id || !alive) return;
-    const job = begin('controls:' + id), d = draftFor(id); d.loading = true;
-    try { const catalog = await client.request<Catalog>('/controls?threadId=' + encodeURIComponent(id), undefined, job.signal); if (job.valid()) d.catalog = catalog; }
-    catch (e) { if (job.valid()) d.catalog = { ...emptyCatalog(), errors: { load: message(e) } }; }
-    finally { if (job.valid()) d.loading = false; }
+  async function loadControls(id = state.currentId, forceReload = true) {
+    if (!id || !alive || state.entities[id]?.readOnly) return;
+    const job = begin('controls:' + id), d = draftFor(id);
+    d.loading = !d.catalog.models.length || !d.catalog.modes.length;
+    d.extrasLoading = true;
+    const path = '/controls?threadId=' + encodeURIComponent(id);
+    const refresh = forceReload ? '&refresh=true' : '';
+    await Promise.all([
+      (async () => {
+        try {
+          const catalog = await client.request<Catalog>(path + '&section=settings' + refresh, undefined, job.signal);
+          if (job.valid()) {
+            const errors = Object.fromEntries(Object.entries(d.catalog.errors).filter(([key]) => !['load','models','modes'].includes(key) && !key.startsWith('models:')));
+            const retained = d.catalog.models.filter(m => (catalog.errors.models || catalog.errors['models:'+runtimeForModel(m.model)]) && !catalog.models.some(next => next.model===m.model));
+            d.catalog = { ...d.catalog, models: [...catalog.models,...retained], modes: catalog.errors.modes ? d.catalog.modes : catalog.modes, errors: { ...errors, ...catalog.errors } };
+          }
+        } catch (e) { if (job.valid()) d.catalog.errors = { ...d.catalog.errors, load: message(e) }; }
+        finally { if (job.valid()) d.loading = false; }
+      })(),
+      (async () => {
+        try {
+          const catalog = await client.request<Catalog>(path + '&section=extras' + refresh, undefined, job.signal);
+          if (job.valid()) {
+            const { skills, ...errors } = d.catalog.errors;
+            d.catalog = { ...d.catalog, skills: catalog.skills, skillErrors: catalog.skillErrors, capabilities: catalog.capabilities, errors: { ...errors, ...catalog.errors } };
+          }
+        } catch (e) { if (job.valid()) d.catalog.errors = { ...d.catalog.errors, skills: message(e) }; }
+        finally { if (job.valid()) d.extrasLoading = false; }
+      })(),
+    ]);
   }
   function apply(n: Update, scope?: string) {
     const id = scope || (typeof n.params.threadId === 'string' ? n.params.threadId : undefined);
@@ -308,12 +334,14 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
       if(state.agentsVisible)void loadSubagents(true);
       return;
     }
+    if(n.method==='viewer/permissionsChanged'||n.method==='viewer/defaultPermissionsChanged'){state.permissionRevision++;return;}
+    if(n.method==='viewer/autoReviewFailure'&&id&&state.entities[id]){state.entities[id].autoReviewFailure=n.params.failure as Thread['autoReviewFailure'];if(state.entities[id].autoReviewFailure)notify('自动审批失败，请选择审批方式','auto-review:'+id+state.entities[id].autoReviewFailure!.id);state.revisions[id]=(state.revisions[id]||0)+1;return;}
     if (n.method === 'viewer/request') {
       const r = n.params as unknown as PendingRequest; state.requests[r.id] = r;
       notify('Codex 需要你的输入', r.id); return;
     }
     if (n.method === 'viewer/requestResolved') { delete state.requests[String(n.params.id)]; return; }
-    if (n.method === 'viewer/nameError') { report(n.params.message, id); return; }
+    if (n.method === 'viewer/nameError') { if(!id||id===state.currentId)toast(String(n.params.message)); return; }
     if (id && state.entities[id]) {
       const previousGoal = state.entities[id].goal;
       reduceNotice(state.entities[id], n);
@@ -340,7 +368,7 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
     if(!previous || runtimeOf(previous)===runtimeOf(thread))return;
     const d=draftFor(id);d.desired=thread.settings;d.dirty=false;d.skills=[];d.catalog=emptyCatalog();
     save('viewer-settings:'+id,undefined);
-    void loadControls(id);
+    void loadControls(id, false);
   }
   async function openThread(id: string, initial?: Snapshot): Promise<boolean> {
     if (!alive || archived.has(id)) return false;
@@ -357,7 +385,7 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
       for (const [key, r] of Object.entries(state.requests)) if (r.params.threadId === id) delete state.requests[key];
       for (const r of result.requests) state.requests[r.id] = r;
       snapshots.set(id, result.seq);
-      const d = draftFor(id); d.uncertain = !!result.uncertain; d.readError = '';
+      const d = draftFor(id); d.uncertain = !!result.uncertain || !!result.thread.executionUncertain; d.readError = '';
       reconcileQueued(id);
       if (!d.dirty) d.desired = result.thread.settings;
       return true;
@@ -377,7 +405,7 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
     if (!alive || generation !== selectionGeneration) return;
     state.hydrating = false;
     if (opened) {
-      state.currentId = id; markRead(id); void loadControls(id); void loadSubagents();
+      state.currentId = id; markRead(id); void loadControls(id, false); void loadSubagents();
     }
     else { state.error = draftFor(id).readError; targetId = state.currentId; }
   }
@@ -388,7 +416,7 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
     const id = targetId || state.currentId;
     if (id) {
       if (id !== state.currentId || state.hydrating) await selectThread(id);
-      else { await openThread(id); if (alive) void loadControls(id); }
+      else { await openThread(id); if (alive) void loadControls(id, false); }
     }
     if (alive) await loadThreads(false, fresh);
     if (alive) { void loadSubagents(fresh); if (state.agentsVisible) void loadAgent(); }
@@ -400,7 +428,7 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
     state.listLoading = false; state.moreLoading = false;
     syncing.clear(); snapshots.clear();
     state.hydrating = false;
-    for (const d of Object.values(state.drafts)) { d.loading = false; if (d.sending) d.uncertain = true; d.sending = false; d.stopping = false; d.uploading = false; d.goalSaving = false; }
+    for (const d of Object.values(state.drafts)) { d.loading = false; d.extrasLoading = false; if (d.sending) d.uncertain = true; d.sending = false; d.stopping = false; d.uploading = false; d.goalSaving = false; }
     state.replying = {};
     state.agentsLoading = false; state.agentLoading = false;
     state.usage = { weekly: null, resetCount: null };
@@ -436,6 +464,11 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
           pageRestored = false; toast('整个后端已重启，页面已更新');
         }
       });
+      return;
+    }
+    if(n.method==='viewer/catalogUpdated'){
+      if(n.params.method==='model/list')void loadControls(state.currentId,false);
+      if(n.params.method==='account/rateLimits/read')void loadUsage(true);
       return;
     }
     if (n.method === 'skills/changed') { void loadControls(); return; }
@@ -710,6 +743,21 @@ export function createViewerStore(client = createClient(), storage: Pick<Storage
     await selectThread(sourceThreadId);if(state.currentId===sourceThreadId){state.targetTurn=position?.turnId || '';state.targetItem=position?.itemId || '';}
   }
   return {
+    readDefaultPermissions:()=>client.request<{mode:'auto'|'manual'}>('/permissions/default'),
+    saveDefaultPermissions:(mode:'auto'|'manual')=>client.request<{mode:'auto'|'manual'}>('/permissions/default',{mode},undefined,'PUT'),
+    async resolveAutoReview(id:string,failureId:string,mode:'manual'|'bypass'|'dismiss'){
+      if(state.permissionSaving)throw new Error('正在保存审批设置');
+      state.permissionSaving=id;
+      try {await client.request('/threads/'+encodeURIComponent(id)+'/permissions/fallback',{failureId,mode});await openThread(id);state.permissionRevision++;}
+      finally {state.permissionSaving='';}
+    },
+    readPermissions: (id:string)=>client.request<PermissionSettings>(`/threads/${encodeURIComponent(id)}/permissions`),
+    async savePermissions(id:string,mode:PermissionSettings['mode']) {
+      if(state.permissionSaving)throw new Error('正在保存审批设置');
+      state.permissionSaving=id;
+      try {return await client.request<PermissionSettings>(`/threads/${encodeURIComponent(id)}/permissions`,{mode},undefined,'PUT');}
+      finally {state.permissionSaving='';}
+    },
     async agentAction(agentId:string,action:string,args:Obj={}){
       const parentId=state.entities[agentId]?.hybrid?.agent?.parentId;
       if(!parentId)throw new Error('此操作仅适用于 Viewer 派发的子任务');

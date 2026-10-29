@@ -1,5 +1,7 @@
 # Codex Viewer architecture
 
+交互式总览：用桌面浏览器打开 [架构地图](docs/architecture/index.html)，支持缩放、拖动、模块与文件下钻、依赖搜索和关键执行链路。范围、状态所有权与更新方法见 [地图说明](docs/architecture/README.md)。
+
 Viewer-managed delegation runs Codex tasks in independent working copies. `server/hybrid.ts` retains logical conversations, operation receipts and result delivery; `server/agents-mcp.ts` authenticates native caller metadata. `server/agent-workspace.ts` applies inspected changes using three-way merge and recovery journals. Native and managed Codex descendants share the existing subagent panel.
 
 ## Runtime boundary

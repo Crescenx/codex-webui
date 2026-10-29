@@ -1,162 +1,21 @@
-import { viewerDocument, viewerWindow, viewerRoot, isElement, isHTMLElement, materialImage, materialVault, materialVaultRoot } from './environment.ts';
-import { unified, type Processor } from 'unified';
-import remarkParse from 'remark-parse';
-import remarkGfm from 'remark-gfm';
-import remarkMath from 'remark-math';
-import { remarkBracketMath } from './math.ts';
-import remarkCjkFriendly from 'remark-cjk-friendly/parseOnly';
-import remarkRehype from 'remark-rehype';
-import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
-import rehypeKatex from 'rehype-katex';
-import { highlightBlocks } from './highlight.ts';
-import rehypeStringify from 'rehype-stringify';
-import type { Root as MarkdownRoot, Data } from 'mdast';
-import type { Root as HtmlRoot, Element } from 'hast';
-import type { Extension } from 'mdast-util-from-markdown';
-declare module 'mdast' { interface Data { fenceClosed?: boolean; fenceSeen?: boolean } }
-
-// Observe the existing tokenizer: quoted/list fences and partial closing markers
-// must have exactly the same meaning here as they do in Markdown.
-function remarkFenceState(this: Processor) {
-  const extension: Extension = { enter: { codeFencedFence() {
-    const node = this.stack.findLast(node => node.type === 'code')!;
-    node.data ??= {};
-    node.data.fenceClosed = !!node.data.fenceSeen;
-    node.data.fenceSeen = true;
-  } } };
-  (this.data().fromMarkdownExtensions ??= []).push(extension);
-}
-const parser = unified().use(remarkParse).use(remarkGfm).use(remarkCjkFriendly).use(remarkMath).use(remarkBracketMath).use(remarkFenceState);
-type Node = { type: string; lang?: string | null; value?: string; data?: Data; position?: { start: { offset?: number }; end: { offset?: number } }; children?: Node[] };
-export type MermaidBlock = { id: string; source: string; closed: boolean };
-export type Rendered = { html: string; atoms: Map<string, string>; diagrams: MermaidBlock[] };
-const converter = unified().use(remarkRehype);
-const sanitizer = unified().use(rehypeSanitize, {
-    ...defaultSchema,
-    attributes: {
-      ...defaultSchema.attributes,
-      '*': [...(defaultSchema.attributes?.['*'] || []), 'dataAtom','dataCopyIgnore','dataMermaid'],
-      a: [...(defaultSchema.attributes?.a || []), 'target', 'rel','dataFile','dataExternal','tabIndex','role'],
-      small:['className','dataCopyIgnore'],
-      code: [...(defaultSchema.attributes?.code || []).filter(a=>(Array.isArray(a)?a[0]:a)!=='className'), ['className', /^language-./, 'math-inline', 'math-display']],
-    },
-  });
-const formatter = unified().use(highlightBlocks)
-    .use(rehypeKatex, { trust: false, throwOnError: false, maxExpand: 500 }).use(rehypeStringify);
-export function renderMarkdown(source: string, threadId?: string, cache = new Map<string, string>()): Rendered {
-  const tree = parser.parse(source);
-  const atoms = new Map<string,string>();
-  const positions = new Map<string,string>();
-  const diagrams: MermaidBlock[] = [];
-  const visit = (node: Node) => {
-    if (['math','inlineMath','code','inlineCode','link','linkReference','image','imageReference'].includes(node.type) && node.position) {
-      const { start, end } = node.position;
-      if (start.offset !== undefined && end.offset !== undefined) {
-        const id = `a${atoms.size}`; atoms.set(id, source.slice(start.offset, end.offset));
-        positions.set(`${start.offset}:${end.offset}`, id);
-        if (node.type === 'code' && node.lang?.toLowerCase() === 'mermaid' && node.data?.fenceSeen) {
-          diagrams.push({ id: String(start.offset), source: node.value || '', closed: !!node.data.fenceClosed });
-        }
-      }
-    }
-    node.children?.forEach(visit);
-  };
-  visit(tree);
-  const diagramStarts = new Set(diagrams.map(block => block.id));
-  const root = converter.runSync(tree as MarkdownRoot);
-  {
-    const walk = (node: HtmlRoot | Element | HtmlRoot['children'][number]) => {
-      if (node.type === 'element') {
-        const key = `${node.position?.start.offset}:${node.position?.end.offset}`;
-        const id = positions.get(key);
-        if (id) node.properties.dataAtom = id;
-        if (node.tagName === 'pre' && diagramStarts.has(String(node.position?.start.offset))) node.properties.dataMermaid = String(node.position!.start.offset);
-        // Remote images must never load merely because a model emitted Markdown.
-        if (node.tagName === 'img') {
-          let target = '';
-          try { target = decodeURIComponent(String(node.properties.src || '')); } catch { /* incomplete URL */ }
-          if (threadId && target && !/^[a-z][a-z\d+.-]*:/i.test(target) && !target.startsWith('//')) {
-            node.properties.src = '/api/files/image?' + new URLSearchParams({ threadId, target });
-            node.properties.title = target;
-          } else {
-            node.tagName = 'span'; node.children = [{ type:'text', value: `[图片：${node.properties.alt || 'image'}]` }];
-            delete node.properties.src; delete node.properties.alt;
-          }
-        }
-        if (node.tagName === 'a') {
-          const href = String(node.properties.href || '');
-          if (/^https?:\/\//i.test(href)) {try{new URL(href);node.properties.dataExternal=href;}catch{delete node.properties.href;}}
-          else {
-            delete node.properties.href;
-            let target = '';
-            // HAST URLs are URI-encoded; file APIs and the clipboard take native paths.
-            try { target = decodeURIComponent(href); } catch { /* incomplete URL */ }
-            if(/^file:/i.test(href)) {
-              target='';
-              try {
-                const uri=new URL(href);
-                if(!uri.hostname || uri.hostname==='localhost') {
-                  target=decodeURIComponent(uri.pathname);
-                  target=target.replace(/^\/([a-z]):\//i,(_,drive:string)=>'/mnt/'+drive.toLowerCase()+'/');
-                  if(uri.hash && /^#L\d+$/.test(uri.hash))target+=uri.hash;
-                }
-              } catch { /* malformed local file URL */ }
-            }
-            if(href.startsWith('obsidian://open?') && materialVault()){
-              try{const uri=new URL(href);target=uri.searchParams.get('vault')===materialVault()?uri.searchParams.get('file')||'':'';
-                if(target.startsWith('/') || target.includes('\\') || target.split('/').some(p=>p==='..'||p==='.'))target='';
-                if(target && materialVaultRoot())target=materialVaultRoot()+'/'+target;
-              }catch{target='';}
-            }
-            if(target && !/[\x00-\x1f\x7f]/.test(target) && !/^[a-z][a-z\d+.-]*:/i.test(target.replace(/:\d+(?::\d+)?$/,'')) && !target.startsWith('//')) {
-              node.properties.dataFile=target; node.properties.tabIndex=0;node.properties.role='button';
-              node.children.push({type:'element',tagName:'small',properties:{dataCopyIgnore:'',className:['link-target']},children:[{type:'text',value:' · '+target.split('/').at(-1)}]});
-            }
-          }
-          if(node.properties.dataExternal)node.children.push({type:'element',tagName:'small',properties:{dataCopyIgnore:'',className:['link-target']},children:[{type:'text',value:' · '+new URL(href).hostname}]});
-          if(!node.properties.dataExternal&&!node.properties.dataFile&&href)node.children.push({type:'element',tagName:'small',properties:{dataCopyIgnore:'',className:['link-target']},children:[{type:'text',value:' · '+href+'（暂不支持此链接格式）'}]});
-          node.properties.target = '_blank'; node.properties.rel = ['noopener','noreferrer'];
-        }
-      }
-      if ('children' in node) {
-        node.children.forEach(walk);
-        node.children = node.children.map(child => {
-          if (child.type !== 'element' || !child.properties.dataAtom) return child;
-          // KaTeX replaces its input node; keep source ownership on an outer node.
-          if (!['code','pre'].includes(child.tagName)) return child;
-          const classes = child.properties.className || [];
-          const math = Array.isArray(classes) && classes.some(c => /^(math-|language-math)/.test(String(c)));
-          if (!math && child.tagName !== 'pre') return child;
-          return {type:'element' as const,tagName:child.tagName === 'pre'?'div':'span',properties:{dataAtom:child.properties.dataAtom},children:[child]};
-        });
-      }
-    };
-    walk(root);
-  }
-  // Sanitize untrusted markup before the trusted KaTeX renderer adds its own MathML/styles.
-  const clean = sanitizer.runSync(root);
-  const next = new Map<string, string>();
-  let cachedChars = 0;
-  // Resolve references across the whole document before caching sanitized blocks.
-  // ponytail: parsing still scans the full source; move it to a worker if long replies remain slow.
-  const html = clean.children.map(child => {
-    const key = JSON.stringify(child);
-    const part = cache.get(key) ?? formatter.stringify(formatter.runSync({ type: 'root', children: [child] }) as HtmlRoot);
-    if (cachedChars + key.length + part.length <= 2_000_000) {
-      next.set(key, part);
-      cachedChars += key.length + part.length;
-    }
-    return part;
-  }).join('');
-  cache.clear();
-  for (const [key, part] of next) cache.set(key, part);
-  return { html, atoms, diagrams };
-}
+import { viewerDocument, viewerWindow, isElement, isHTMLElement, materialImage } from './environment.ts';
+import type { Rendered } from './markdown.ts';
+export type { Rendered, MermaidBlock } from './markdown.ts';
 
 const maps = new WeakMap<HTMLElement, Map<string,string>>();
-export function renderInto(el: HTMLElement, rendered: Rendered, preserved = new Map<string, HTMLElement>()) {
+const mounted = new WeakMap<HTMLElement, {html:string;nodes:globalThis.Node[]}[]>();
+export function clearRendered(el:HTMLElement){maps.delete(el);mounted.delete(el);}
+export async function renderInto(el: HTMLElement, rendered: Rendered, preserved = new Map<string, HTMLElement>(), current = () => true) {
   const focused = el.ownerDocument.activeElement;
-  const template = el.ownerDocument.createElement('template'); template.innerHTML = rendered.html;
+  let previous=mounted.get(el);
+  if(!previous){el.replaceChildren();previous=[];mounted.set(el,previous);}
+  maps.set(el, rendered.atoms);
+  let deadline=performance.now()+8;
+  for(let index=0;index<rendered.blocks.length;index++){
+    if(!current())return false;
+    const html=rendered.blocks[index],old=previous[index];
+    if(old?.html===html)continue;
+    const template = el.ownerDocument.createElement('template'); template.innerHTML = html;
   // Browsers reuse mounted images with the same URL even with no-store; files can be overwritten.
   for (const img of template.content.querySelectorAll<HTMLImageElement>('img[src^="/api/files/image?"]')) {
     const target=new URL(img.getAttribute('src')!, 'http://localhost').searchParams.get('target');
@@ -166,13 +25,26 @@ export function renderInto(el: HTMLElement, rendered: Rendered, preserved = new 
     const existing = preserved.get(slot.dataset.mermaid!);
     if (existing) slot.replaceWith(existing);
   }
-  el.replaceChildren(template.content); maps.set(el, rendered.atoms);
+    const nodes=[...template.content.childNodes];
+    const anchor=old?.nodes.find(node=>node.parentNode===el);
+    el.insertBefore(template.content,anchor||null);
+    for(const node of old?.nodes||[])if(node.parentNode===el)el.removeChild(node);
+    previous[index]={html,nodes};
+    if(performance.now()>=deadline){
+      const scheduler=(globalThis as typeof globalThis & {scheduler?:{yield:()=>Promise<void>}}).scheduler;
+      if(scheduler?.yield)await scheduler.yield();else await new Promise(resolve=>setTimeout(resolve,0));
+      deadline=performance.now()+8;
+    }
+  }
+  if(!current())return false;
+  for(const block of previous.splice(rendered.blocks.length))for(const node of block.nodes)if(node.parentNode===el)el.removeChild(node);
   if (isHTMLElement(focused) && el.contains(focused) && focused !== el.ownerDocument.activeElement) focused.focus({ preventScroll: true });
-  for (const img of el.querySelectorAll<HTMLImageElement>('img:not(.mermaid-image)')) img.addEventListener('error', () => {
+  for (const img of el.querySelectorAll<HTMLImageElement>('img:not(.mermaid-image):not([data-error-bound])')) {img.dataset.errorBound='';img.addEventListener('error', () => {
     const fallback = el.ownerDocument.createElement('span'); fallback.dataset.atom = img.dataset.atom;
     fallback.textContent = `图片无法读取：${img.alt || img.title}`; fallback.title = img.title;
     img.replaceWith(fallback);
-  }, { once: true });
+  }, { once: true });}
+  return true;
 }
 function overlaps(range: Range, node: Node | globalThis.Node): boolean {
   const r = (node as globalThis.Node).ownerDocument!.createRange(); r.selectNodeContents(node as globalThis.Node);

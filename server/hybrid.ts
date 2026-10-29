@@ -12,12 +12,14 @@ import type { HandoffRecord, HybridInfo, ManagedAgent } from '../shared/hybrid.t
 import type { Item, Notice, Obj, Settings, Thread, Turn } from '../shared/protocol.ts';
 
 type Binding={runtimeId:RuntimeId;sessionId:string;cursor:number};
-type Conversation={id:string;active:string;bindings:Binding[];snapshot:Thread;handoffs:HandoffRecord[];agent?:ManagedAgent;inherited:Obj[];uncertain?:boolean;archived?:boolean;lastCompleted?:string;pendingContext?:{sessionId:string;text:string;cursor:number}};
+type AgentResult={revision:number;turnId:string;state:ManagedAgent["state"];deliveryState:"pending"|"sending"|"unknown"};
+type Conversation={id:string;active:string;bindings:Binding[];snapshot:Thread;handoffs:HandoffRecord[];agent?:ManagedAgent;inherited:Obj[];uncertain?:boolean;archived?:boolean;lastCompleted?:string;resultWakePaused?:boolean;results?:AgentResult[];pendingContext?:{sessionId:string;text:string;cursor:number}};
 type Receipt={id:string;owner:string;kind:string;state:'accepted'|'running'|'completed'|'failed'|'unknown';fingerprint:string;result?:Obj;error?:string;nativeId?:string;createdAt:number};
 export type HybridHooks={
   load:(id:string,open?:boolean)=>Promise<Thread>;
   create:(runtime:RuntimeId,cwd:string,settings?:Settings)=>Promise<Thread>;
   submit:(id:string,text:string,operationId:string,context?:string,settings?:Settings)=>Promise<Obj>;
+  deliverResults?:(id:string,operationId:string,results:Obj[])=>Promise<Obj>;
   stop:(id:string)=>Promise<void>;
   recover:(id:string,input?:{outcome?:'completed'|'cancelled'|'failed';evidence?:string;terminationEvidence?:string})=>Promise<void>;
   ready:(id:string)=>boolean;
@@ -40,6 +42,8 @@ export class HybridSessions extends EventEmitter {
   private owners=new Map<string,string>();
   private locks=new Set<string>();
   private dirty=new Set<string>();
+  private dirtyTurns=new Map<string,Map<string,{turn:Turn;position:number;items:Map<string,{item:Item;position:number}>}>>();
+  private savedContext=new Set<string>();
   private checkpoint?:NodeJS.Timeout;
   private dispatching=new Map<string,Receipt>();
   private ticking=false;
@@ -50,19 +54,25 @@ export class HybridSessions extends EventEmitter {
     super();this.hooks=hooks;this.workspaces=new AgentWorkspaces(workspaceRoot);
     this.db=new DatabaseSync(file);chmodSync(file,0o600);
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY,data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS actions(owner TEXT NOT NULL,id TEXT NOT NULL,data TEXT NOT NULL,PRIMARY KEY(owner,id));');
+    this.db.exec('CREATE TABLE IF NOT EXISTS conversation_turns(owner TEXT, id TEXT, position INTEGER, data TEXT NOT NULL, PRIMARY KEY(owner,id)); CREATE TABLE IF NOT EXISTS conversation_items(owner TEXT, turn_id TEXT, id TEXT, position INTEGER, data TEXT NOT NULL, PRIMARY KEY(owner,turn_id,id)); CREATE TABLE IF NOT EXISTS conversation_context(owner TEXT PRIMARY KEY,data TEXT NOT NULL);');
     for(const row of this.db.prepare('SELECT data FROM conversations').all()){
       const c=JSON.parse(String(row.data)) as Conversation;this.records.set(c.id,c);
+      if(!c.snapshot.turns){
+        c.snapshot.turns=this.db.prepare('SELECT data,id FROM conversation_turns WHERE owner=? ORDER BY position').all(c.id).map(row=>({...JSON.parse(String(row.data)),items:this.db.prepare('SELECT data FROM conversation_items WHERE owner=? AND turn_id=? ORDER BY position').all(c.id,String(row.id)).map(item=>JSON.parse(String(item.data)))}));
+      }
+      if(!c.inherited){c.inherited=JSON.parse(String(this.db.prepare('SELECT data FROM conversation_context WHERE owner=?').get(c.id)?.data||'[]'));this.savedContext.add(c.id);}
       for(const b of c.bindings)this.owners.set(b.sessionId,c.id);
       if(!this.supported(c))continue; // Retain retired runtime records without executing or rewriting them.
-      if(c.agent){hooks.addWorkspace(path.join(c.agent.workspace.root,'work'));if(c.agent.deliveryState==='sending')c.agent.deliveryState='unknown';if(c.agent.applyState==='applying')c.agent.applyState='unknown';}
+      if(c.agent){hooks.addWorkspace(path.join(c.agent.workspace.root,'work'));for(const result of this.resultQueue(c))if(result.deliveryState==='sending')result.deliveryState='unknown';this.resultState(c);if(c.agent.applyState==='applying')c.agent.applyState='unknown';}
       if(c.snapshot.turns?.some(t=>t.status==='inProgress')){c.uncertain=true;if(c.agent)c.agent.state='unknown';for(const t of c.snapshot.turns)if(t.status==='inProgress')t.status='failed';}
       for(const h of c.handoffs)if(h.state==='preparing'){h.state='unknown';c.uncertain=true;}
+      for(const turn of c.snapshot.turns)this.changedTurn(c,turn);
       this.save(c,true);
     }
     for(const row of this.db.prepare('SELECT data FROM actions').all()){
       const r=JSON.parse(String(row.data)) as Receipt;
       const owner=this.records.get(this.logical(r.owner));if(owner&&!this.supported(owner))continue;
-      if(r.state==='accepted'||r.state==='running'){r.state='unknown';r.error='服务已重启，操作未自动重放';this.saveReceipt(r);const c=this.records.get(this.logical(r.nativeId||r.owner));if(c){c.uncertain=true;this.save(c,true);}}
+      if(r.state==='accepted'||r.state==='running'){r.state='unknown';r.error='服务已重启，操作未自动重放';this.saveReceipt(r);const c=this.records.get(this.logical(r.nativeId||r.owner));if(c&&r.kind!=='child-result'){c.uncertain=true;this.save(c,true);}}
     }
   }
   private supported(c:Conversation){return supportedBinding(c.bindings.find(b=>b.sessionId===c.active));}
@@ -100,27 +110,53 @@ export class HybridSessions extends EventEmitter {
   private async ensure(id:string){
     if(this.has(id))return this.get(id);
     const t=await this.hooks.load(id,true);await this.hooks.authorize(t.cwd);
-    const c:Conversation={id:t.id,active:t.id,bindings:[{runtimeId:runtimeOf(t),sessionId:t.id,cursor:0}],snapshot:{...copy(t),runtimeId:runtimeOf(t),turns:[]},handoffs:[],inherited:[]};
+    const {turns,...metadata}=t;
+    const c:Conversation={id:t.id,active:t.id,bindings:[{runtimeId:runtimeOf(t),sessionId:t.id,cursor:0}],snapshot:{...copy(metadata),runtimeId:runtimeOf(t),turns:[]},handoffs:[],inherited:[]};
     this.records.set(c.id,c);this.owners.set(t.id,c.id);this.observe(t);this.save(c,true);return c;
   }
   private publicId(c:Conversation,native:string,id:string){return native===c.id?id:native+'::'+id;}
   nativeTurn(native:string,id:unknown){if(typeof id!=='string')return id;const prefix=native+'::';return id.startsWith(prefix)?id.slice(prefix.length):id;}
   private item(c:Conversation,native:string,item:Item):Item {
-    return {...copy(item),id:this.publicId(c,native,item.id),source:{...(typeof item.source==='object'?item.source:{}),runtimeId:c.bindings.find(b=>b.sessionId===native)?.runtimeId,nativeSessionId:native,nativeItemId:item.id}};
+    let displayed=copy(item);
+    if(item.type==='functionCallOutput'&&item.namespace==='viewer_agents'&&item.name==='agent_result'&&typeof item.output==='string'){
+      try{
+        const envelope=JSON.parse(item.output),receipt=this.operations(c.id).find(r=>r.kind==='child-result'&&r.id===envelope.operationId);
+        if(receipt&&JSON.stringify(receipt.result?.results)===JSON.stringify(envelope.results)){
+          const results=envelope.results as Obj[];
+          displayed={...displayed,type:'collabAgentToolCall',tool:'agentResult',status:'completed',senderThreadId:c.id,
+            receiverThreadIds:results.map(r=>r.agentId),prompt:results.map(r=>`${r.task}\n${r.answer}`).join('\n\n'),
+            agentsStates:Object.fromEntries(results.map(r=>[String(r.agentId),{status:r.state,message:r.answer}]))};
+        }
+      }catch{}
+    }
+    return {...displayed,id:this.publicId(c,native,item.id),source:{...(typeof item.source==='object'?item.source:{}),runtimeId:c.bindings.find(b=>b.sessionId===native)?.runtimeId,nativeSessionId:native,nativeItemId:item.id}};
   }
-  private turn(c:Conversation,native:string,t:Turn):Turn{return {...copy(t),id:this.publicId(c,native,t.id),items:t.items.map(i=>this.item(c,native,i))};}
-  observe(t:Thread,terminal=false){
+  private turn(c:Conversation,native:string,t:Turn):Turn{const {items,...metadata}=t;return {...copy(metadata),id:this.publicId(c,native,t.id),items:items.map(i=>this.item(c,native,i))};}
+  private changedTurn(c:Conversation,turn:Turn,items=turn.items){
+    let turns=this.dirtyTurns.get(c.id);if(!turns)this.dirtyTurns.set(c.id,turns=new Map());
+    let change=turns.get(turn.id);if(!change)turns.set(turn.id,change={turn,position:c.snapshot.turns!.indexOf(turn),items:new Map()});
+    for(const item of items)change.items.set(item.id,{item,position:turn.items.indexOf(item)});
+  }
+  observe(t:Thread,terminal=false,notice?:Notice){
     const c=this.records.get(this.logical(t.id));if(!c||c.archived||!this.supported(c))return;
     const turns=c.snapshot.turns??=[];
-    for(const raw of t.turns||[]){
-      const incoming=this.turn(c,t.id,raw),previous=turns.find(v=>v.id===incoming.id);
-      if(previous){const items=new Map(previous.items.map(i=>[i.id,i]));for(const i of incoming.items)items.set(i.id,{...items.get(i.id),...i});Object.assign(previous,incoming,{items:[...items.values()]});}
-      else turns.push(incoming);
+    const turnId=notice?.params.turnId||(notice?.params.turn as Turn|undefined)?.id;
+    const sourceTurns=notice&&notice.method!=='thread/started'?(turnId?t.turns?.filter(v=>v.id===turnId)||[]:[]):t.turns||[];
+    for(const raw of sourceTurns){
+      const id=this.publicId(c,t.id,raw.id),previous=turns.find(v=>v.id===id);
+      const itemId=notice?.params.itemId||(notice?.params.item as Item|undefined)?.id;
+      const sourceItems=previous&&itemId?raw.items.filter(v=>v.id===itemId):raw.items;
+      const {items:ignored,...metadata}=raw;
+      const incoming={...copy(metadata),id,items:sourceItems.map(i=>this.item(c,t.id,i))};
+      if(previous){
+        for(const item of incoming.items){const index=previous.items.findIndex(v=>v.id===item.id);if(index<0)previous.items.push(item);else previous.items[index]={...previous.items[index],...item};}
+        Object.assign(previous,metadata,{id});this.changedTurn(c,previous,sourceItems.map(item=>previous.items.find(v=>v.id===this.publicId(c,t.id,item.id))!));
+      }else{turns.push(incoming);this.changedTurn(c,incoming);}
     }
     if(t.id===c.active){
       const switched=c.snapshot.runtimeId!==c.bindings.find(b=>b.sessionId===t.id)!.runtimeId;
       const reset=switched?{contextManagement:undefined,goal:null,goalError:undefined,configOptions:undefined,settings:undefined,tokenUsage:undefined,approvalsReviewer:undefined,runtimeError:undefined,executionUncertain:false}:{};
-      const {id,turns:ignored,...metadata}=copy(t);c.snapshot={...c.snapshot,...reset,...metadata,name:c.snapshot.name??metadata.name,preview:c.agent?.task||c.snapshot.preview||metadata.preview,id:c.id,turns};
+      const {id,turns:ignored,...rawMetadata}=t;const metadata=copy(rawMetadata);c.snapshot={...c.snapshot,...reset,...metadata,name:c.snapshot.name??metadata.name,preview:c.agent?.task||c.snapshot.preview||metadata.preview,id:c.id,turns};
       c.snapshot.runtimeId=c.bindings.find(b=>b.sessionId===t.id)!.runtimeId;
       c.snapshot.capabilities=runtimeCapabilities(c.snapshot.runtimeId);
     }
@@ -131,7 +167,13 @@ export class HybridSessions extends EventEmitter {
         const receipt=this.dispatching.get(t.id);
         if(t.executionUncertain)c.uncertain=true;
         if(receipt){receipt.state=t.executionUncertain?'unknown':turn.status==='completed'?'completed':'failed';this.saveReceipt(receipt);this.dispatching.delete(t.id);}
-        if(c.agent){c.agent.state=t.executionUncertain?'unknown':turn.status==='completed'?'completed':['cancelled','interrupted'].includes(turn.status)?'interrupted':'errored';c.agent.resultRevision++;c.agent.deliveryState='pending';}
+        if(c.agent){
+          this.resultQueue(c);
+          c.agent.state=t.executionUncertain?'unknown':turn.status==='completed'?'completed':['cancelled','interrupted'].includes(turn.status)?'interrupted':'errored';
+          c.agent.resultRevision++;
+          c.results!.push({revision:c.agent.resultRevision,turnId:publicTurn!,state:c.agent.state,deliveryState:t.executionUncertain?'unknown':'pending'});
+          this.resultState(c);
+        }
         this.save(c,true);this.emit('changed',c.id);return;
       }
     }
@@ -162,7 +204,25 @@ export class HybridSessions extends EventEmitter {
     return {method:n.method,params:p};
   }
   private save(c:Conversation,immediate=false){this.dirty.add(c.id);if(immediate)this.flush();else this.checkpoint??=setTimeout(()=>this.flush(),200);}
-  private flush(){clearTimeout(this.checkpoint);this.checkpoint=undefined;if(this.closed)return;for(const id of this.dirty)this.db.prepare('INSERT OR REPLACE INTO conversations VALUES(?,?)').run(id,JSON.stringify(this.records.get(id)));this.dirty.clear();}
+  private flush(){
+    clearTimeout(this.checkpoint);this.checkpoint=undefined;if(this.closed||!this.dirty.size)return;
+    this.db.exec('BEGIN IMMEDIATE');
+    try{
+      for(const id of this.dirty){
+        const c=this.records.get(id)!;const {snapshot,inherited,...metadata}=c;const {turns,...thread}=snapshot;
+        this.db.prepare('INSERT OR REPLACE INTO conversations VALUES(?,?)').run(id,JSON.stringify({...metadata,snapshot:thread}));
+        if(!this.savedContext.has(id))this.db.prepare('INSERT OR REPLACE INTO conversation_context VALUES(?,?)').run(id,JSON.stringify(inherited));
+        for(const [turnId,change] of this.dirtyTurns.get(id)||[]){
+          const {items,...turn}=change.turn;
+          this.db.prepare('INSERT OR REPLACE INTO conversation_turns VALUES(?,?,?,?)').run(id,turnId,change.position,JSON.stringify(turn));
+          for(const [itemId,value] of change.items)this.db.prepare('INSERT OR REPLACE INTO conversation_items VALUES(?,?,?,?,?)').run(id,turnId,itemId,value.position,JSON.stringify(value.item));
+        }
+      }
+      this.db.exec('COMMIT');
+      for(const id of this.dirty)this.savedContext.add(id);
+      this.dirty.clear();this.dirtyTurns.clear();
+    }catch(error){this.db.exec('ROLLBACK');throw error;}
+  }
   private saveReceipt(r:Receipt){this.db.prepare('INSERT OR REPLACE INTO actions VALUES(?,?,?)').run(r.owner,r.id,JSON.stringify(r));}
   operations(id:string){return this.db.prepare('SELECT data FROM actions WHERE owner=? ORDER BY rowid').all(this.logical(id)).map(r=>JSON.parse(String(r.data)) as Receipt);}
   private async operation(owner:string,id:unknown,kind:string,input:unknown,work:(r:Receipt)=>Promise<Obj>){
@@ -176,6 +236,32 @@ export class HybridSessions extends EventEmitter {
     try{r.result=await work(r);if(r.state==='accepted')r.state='completed';this.saveReceipt(r);return copy(r);}
     catch(error){r.error=error instanceof Error?error.message:String(error);r.state=r.state==='running'?'unknown':'failed';this.saveReceipt(r);if(r.state==='unknown'){const c=this.records.get(this.logical(r.nativeId||owner));if(c){c.uncertain=true;this.save(c,true);}}throw error;}
     finally{this.locks.delete(owner);this.emit('changed',owner);}
+  }
+  private wakePaused(c:Conversation){return c.resultWakePaused||c.snapshot.goal?.status==='paused';}
+  pauseResultWake(id:string,paused:boolean){const c=this.records.get(this.logical(id));if(c){c.resultWakePaused=paused;this.save(c,true);}}
+  private resultQueue(child:Conversation):AgentResult[]{
+    if(!child.results){
+      const a=child.agent!,turnId=child.lastCompleted||child.snapshot.turns?.filter(t=>t.status!=='inProgress').at(-1)?.id;
+      child.results=a.resultRevision>a.deliveredRevision&&turnId?[{revision:a.resultRevision,turnId,state:a.state,deliveryState:a.deliveryState==='sending'?'sending':a.deliveryState==='unknown'?'unknown':'pending'}]:[];
+    }
+    return child.results;
+  }
+  private resultState(child:Conversation){child.agent!.deliveryState=this.resultQueue(child)[0]?.deliveryState||'delivered';}
+  private result(child:Conversation,result:AgentResult,changes?:unknown):Obj {
+    const a=child.agent!,turn=child.snapshot.turns?.find(t=>t.id===result.turnId);
+    return {resultId:`${child.id}:${result.revision}`,agentId:child.id,resultRevision:result.revision,turnId:result.turnId,task:a.task,state:result.state,
+      answer:turn?.items.filter(i=>i.type==='agentMessage'&&(!i.phase||i.phase==='final_answer')).map(i=>i.text).join('\n')||a.error||result.state,...(changes===undefined?{}:{changes})};
+  }
+  private consumed(child:Conversation,revision:number){
+    child.results=this.resultQueue(child).filter(result=>result.revision!==revision);
+    child.agent!.deliveredRevision=Math.max(child.agent!.deliveredRevision,revision);
+    this.resultState(child);this.save(child,true);this.emit('changed',child.agent!.parentId);
+  }
+  private readableResult(child:Conversation,changes?:unknown):Obj|undefined {
+    const pending=this.resultQueue(child)[0];
+    // Automatic delivery reserves a revision before any await; polling cannot duplicate it.
+    if(!pending||pending.deliveryState!=='pending')return;
+    const result=this.result(child,pending,changes);this.consumed(child,pending.revision);return result;
   }
   private recordsFor(c:Conversation):Obj[]{return (c.snapshot.turns||[]).flatMap(t=>t.items.map(item=>publicValue({turnId:t.id,status:t.status,...copy(item)}) as Obj));}
   private pack(records:Obj[],source:'conversation'|'inherited'){
@@ -247,7 +333,7 @@ export class HybridSessions extends EventEmitter {
     });
   }
   private child(parentId:string,childId:unknown){if(typeof childId!=='string')throw new HttpError(400,'需要 agentId');const child=this.get(childId);if(child.agent?.parentId!==this.logical(parentId))throw new HttpError(403,'只能操作当前会话直接派发的子任务');return child;}
-  async tool(caller:string,name:string,args:Obj):Promise<unknown>{
+  async tool(caller:string,name:string,args:Obj,consumeResult=false):Promise<unknown>{
     if(this.isInactive(caller))throw new HttpError(409,'此执行者已交出主任务或状态待核对');
     if(name==='spawn_agent')return this.spawn(caller,args);
     if(name==='list_agents')return {data:this.children(caller)};
@@ -263,9 +349,15 @@ export class HybridSessions extends EventEmitter {
     if(name==='wait_agent'){
       const ms=Number(args.timeoutMs??1000);if(!Number.isFinite(ms)||ms<0||ms>20000)throw new HttpError(400,'等待时间须为 0–20000 ms');
       const until=Date.now()+ms;while(c.agent!.state==='running'&&Date.now()<until&&!this.closed)await new Promise(resolve=>setTimeout(resolve,100));
-      return this.view(c.snapshot);
+      const result=consumeResult?this.readableResult(c):undefined;
+      // MCP waits expose the final body once, through the same receipt as push delivery.
+      return consumeResult?{agentId:c.id,agentState:c.agent!.state,resultRevision:c.agent!.resultRevision,...(result?{result}:{alreadyDelivered:this.resultQueue(c).length===0})}:this.view(c.snapshot);
     }
-    if(name==='agent_changes')return this.workspaces.changes(c.agent!.workspace);
+    if(name==='agent_changes'){
+      const revision=c.agent!.resultRevision,diff=await this.workspaces.changes(c.agent!.workspace);
+      const result=consumeResult&&revision===c.agent!.resultRevision?this.readableResult(c):undefined;
+      return {...diff,...(result?{result}:{})};
+    }
     if(name==='apply_agent')return this.operation(c.id,args.operationId,'apply',args,async()=>{
       if(!isIdle(await this.hooks.load(c.active,true))||!this.hooks.ready(c.active))throw new HttpError(409,'请先结束子任务再合并');
       await this.hooks.authorize(c.agent!.workspace.source);c.agent!.applyState='applying';this.save(c,true);
@@ -282,20 +374,44 @@ export class HybridSessions extends EventEmitter {
   }
   async tick(){
     if(this.closed||this.ticking)return;this.ticking=true;
-    try{for(const child of this.records.values()){
-      const a=child.agent;if(!this.supported(child)||!a||a.deliveryState!=='pending'||a.resultRevision<=a.deliveredRevision)continue;
-      const parent=this.records.get(a.parentId);if(!parent||!this.supported(parent)||parent.archived||parent.uncertain||this.locks.has(parent.id)||!this.hooks.ready(parent.active))continue;
+    try{for(const parent of this.records.values()){
+      if(!this.supported(parent)||parent.archived||parent.uncertain||this.wakePaused(parent)||this.locks.has(parent.id)||!this.hooks.ready(parent.active))continue;
+      const children=[...this.records.values()].filter(c=>this.supported(c)&&c.agent?.parentId===parent.id);
+      if(!children.some(c=>this.resultQueue(c).length))continue;
+      this.locks.add(parent.id);
+      let receipt:Receipt|undefined;let selected:{child:Conversation;result:AgentResult}[]=[];
       try{
-        const active=parent.active,t=await this.hooks.load(active,true);if(!isIdle(t)||parent.active!==active||this.locks.has(parent.id)||parent.uncertain)continue;
-        const revision=a.resultRevision;this.locks.add(parent.id);a.deliveryState='sending';this.save(child,true);
-        const diff=await this.workspaces.changes(a.workspace),answer=child.snapshot.turns?.at(-1)?.items.filter(i=>i.type==='agentMessage').map(i=>i.text).join('\n')||a.error||a.state;
-        const operationId='child-result-'+fingerprint({child:child.id,revision}).slice(0,32);
-        const receipt:Receipt={id:operationId,owner:parent.id,kind:'child-result',state:'running',fingerprint:fingerprint({child:child.id,revision}),nativeId:parent.active,createdAt:Date.now()};
-        this.saveReceipt(receipt);this.dispatching.set(parent.active,receipt);
-        await this.hooks.submit(parent.active,'子智能体已返回，请处理结果并继续主任务。需要采用文件修改时，先检查 agent_changes，再调用 apply_agent；由你决定采用或继续派发。',operationId,JSON.stringify({agentId:child.id,task:a.task,state:a.state,answer,changes:diff}));
-        a.deliveredRevision=revision;a.deliveryState=a.resultRevision>revision?'pending':'delivered';this.save(child,true);this.emit('changed',parent.id);
-      }catch(error){if(a.deliveryState==='sending'){a.deliveryState='unknown';a.error='结果回传未确认，未自动重发：'+(error instanceof Error?error.message:String(error));this.save(child,true);}}
-      finally{this.locks.delete(parent.id);}
+        const active=parent.active,t=await this.hooks.load(active,true);
+        if(parent.active!==active||parent.uncertain||parent.resultWakePaused||t.executionUncertain||!this.hooks.ready(active))continue;
+        // A lost response is reconciled only with an exact result envelope in native history.
+        for(const item of (t.turns||[]).flatMap(turn=>turn.items)){
+          if(item.type!=='functionCallOutput'||item.namespace!=='viewer_agents'||item.name!=='agent_result'||typeof item.output!=='string')continue;
+          let envelope:Obj;try{envelope=JSON.parse(item.output);}catch{continue;}
+          const saved=this.operations(parent.id).find(r=>r.kind==='child-result'&&r.id===envelope.operationId);
+          if(!saved||JSON.stringify(saved.result?.results)!==JSON.stringify(envelope.results))continue;
+          saved.state='completed';this.saveReceipt(saved);
+          for(const result of envelope.results as Obj[]){const child=children.find(c=>c.id===result.agentId);if(child&&Number(result.resultRevision)<=child.agent!.resultRevision)this.consumed(child,Number(result.resultRevision));}
+        }
+        selected=children.flatMap(child=>{const result=this.resultQueue(child)[0];return result?.deliveryState==='pending'?[{child,result}]:[];});
+        if(!selected.length)continue;
+        for(const {child,result} of selected){result.deliveryState='sending';this.resultState(child);this.save(child,true);}
+        const results:Obj[]=[];
+        for(const {child,result} of selected)results.push(this.result(child,result,await this.workspaces.changes(child.agent!.workspace)));
+        if(parent.active!==active||parent.uncertain||this.wakePaused(parent)||!this.hooks.ready(active))
+          throw Object.assign(new HttpError(409,'会话状态已变化，稍后投递结果'),{notSubmitted:true});
+        const operationId='child-result-'+fingerprint(results.map(r=>r.resultId)).slice(0,32);
+        receipt={id:operationId,owner:parent.id,kind:'child-result',state:'accepted',fingerprint:fingerprint(results),nativeId:active,createdAt:Date.now(),result:{results}};
+        this.saveReceipt(receipt);
+        if(!this.hooks.deliverResults)throw new HttpError(409,'运行时没有子代理结果入口');
+        receipt.state='running';this.saveReceipt(receipt);
+        await this.hooks.deliverResults(active,operationId,results);
+        receipt.state='completed';this.saveReceipt(receipt);
+        for(const {child,result} of selected)this.consumed(child,result.revision);
+      }catch(error){
+        const notSubmitted=!receipt||receipt.state==='accepted'||(error as {notSubmitted?:boolean}).notSubmitted===true;
+        if(receipt){receipt.state=notSubmitted?'failed':'unknown';receipt.error=error instanceof Error?error.message:String(error);this.saveReceipt(receipt);}
+        for(const {child,result} of selected){if(result.deliveryState!=='sending')continue;result.deliveryState=notSubmitted?'pending':'unknown';this.resultState(child);child.agent!.error=notSubmitted?undefined:'结果投递未确认，等待历史核对；未自动重发';this.save(child,true);}
+      }finally{this.locks.delete(parent.id);}
     }}finally{this.ticking=false;}
   }
   async recover(id:string,input?:{outcome?:'completed'|'cancelled'|'failed';evidence?:string;terminationEvidence?:string}){const c=this.get(id);if(this.locks.has(c.id))throw new HttpError(409,'协作操作正在运行');await this.hooks.recover(c.active,input);this.observe(await this.hooks.load(c.active,true));c.uncertain=false;this.save(c,true);this.emit('changed',c.id);return this.view(c.snapshot);}

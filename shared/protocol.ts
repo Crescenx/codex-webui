@@ -1,3 +1,4 @@
+import type { AutoReviewFailure } from './auto-review.ts';
 import type { ReferenceData } from "./references.ts";
 import type { RuntimeCapabilities, RuntimeId } from './runtime.ts';
 import type { HybridInfo } from './hybrid.ts';
@@ -50,7 +51,7 @@ export function usageFrom(result: Obj): Usage {
     ...(buckets && ('antigravity-google' in buckets || 'antigravity-external' in buckets) ? { antigravity: { google: group('antigravity-google'), external: group('antigravity-external') } } : {}),
     ...(result.runtimeErrors ? { errors: result.runtimeErrors as Record<string, string> } : {}) };
 }
-export type Thread = Partial<ReferenceData> & { id: string; cwd: string; hybrid?: HybridInfo; agentState?: string; runtimeId?: RuntimeId; nativeSessionId?: string; capabilities?: RuntimeCapabilities; runtimeError?: string; executionUncertain?: boolean; parentThreadId?: string | null; source?: string | Obj; agentNickname?: string | null; agentRole?: string | null; projectRoot?:string; settings?:Settings; contextManagement?:boolean; approvalsReviewer?:'user'|'auto_review'; name?: string | null; preview?: string; updatedAt?: number; status?: { type: string; activeFlags?: string[] }; turns?: Turn[]; tokenUsage?: TokenUsage; goal?: ThreadGoal | null; goalError?: string };
+export type Thread = Partial<ReferenceData> & { id: string; cwd: string; readOnly?: boolean; autoReviewFailure?: AutoReviewFailure | null; nativeRuntime?: string; hybrid?: HybridInfo; agentState?: string; runtimeId?: RuntimeId; nativeSessionId?: string; capabilities?: RuntimeCapabilities; runtimeError?: string; executionUncertain?: boolean; parentThreadId?: string | null; source?: string | Obj; agentNickname?: string | null; agentRole?: string | null; projectRoot?:string; settings?:Settings; contextManagement?:boolean; approvalsReviewer?:'user'|'auto_review'; name?: string | null; preview?: string; updatedAt?: number; status?: { type: string; activeFlags?: string[] }; turns?: Turn[]; tokenUsage?: TokenUsage; goal?: ThreadGoal | null; goalError?: string };
 export type Notice = { method: string; params: Obj };
 export type PendingRequest = { id: string; method: string; params: Obj; windows: boolean; windowsEvidence?:string[] };
 export function shortTitle(text: string): string {
@@ -64,7 +65,7 @@ export function mergeThreadMetadata(target: Thread, source: Thread): void {
   if (source.name !== undefined) target.name = source.name;
   if (source.preview || !target.preview) target.preview = source.preview;
   if (source.projectRoot !== undefined) target.projectRoot = source.projectRoot;
-  for (const key of ['parentThreadId', 'source', 'agentNickname', 'agentRole', 'runtimeId', 'nativeSessionId', 'capabilities', 'hybrid', 'agentState'] as const) if (source[key] !== undefined) Object.assign(target, { [key]: source[key] });
+  for (const key of ['parentThreadId', 'source', 'agentNickname', 'agentRole', 'runtimeId', 'nativeSessionId', 'capabilities', 'hybrid', 'agentState', 'readOnly', 'nativeRuntime', 'autoReviewFailure'] as const) if (source[key] !== undefined) Object.assign(target, { [key]: source[key] });
   target.updatedAt = Math.max(target.updatedAt || 0, source.updatedAt || 0);
 }
 export function threadFrom(value: unknown): Thread {
@@ -106,7 +107,17 @@ function mergeItems(previous:Item[],incoming:Item[]):Item[] {
 export function reduceNotice(thread: Thread, n: Notice): void {
   const p = n.params;
   if (p.threadId !== thread.id) return;
-  if (n.method === 'viewer/executionState') { thread.executionUncertain = p.uncertain === true; thread.runtimeError = typeof p.error === 'string' ? p.error : undefined; }
+  if (n.method === 'viewer/executionState') {
+    thread.executionUncertain = p.uncertain === true;
+    thread.runtimeError = typeof p.error === 'string' ? p.error : undefined;
+    if (thread.executionUncertain) {
+      thread.status = { type: 'systemError' };
+      for (const turn of thread.turns || []) if (turn.status === 'inProgress') {
+        turn.status = 'failed';
+        turn.error = { message: thread.runtimeError || '执行连接已断开，结果未知' };
+      }
+    }
+  }
   if (n.method === 'thread/goal/updated' || n.method === 'thread/goal/cleared') {
     thread.goal = n.method === 'thread/goal/cleared' ? null : goalFrom(p.goal, thread.id);
     delete thread.goalError;

@@ -1,3 +1,4 @@
+import { saveDefaultPermissionMode } from '../server/permissions.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -58,16 +59,16 @@ test('HTTP grants only server-proposed rules and preserves the configured approv
       assert.ok(observed.every(c => c.params.approvalsReviewer==='auto_review'));
     }
     assert.ok(calls.some(c=>c.method==='thread/settings/update'&&c.params.approvalsReviewer==='auto_review'));
-    reviewer='user';
+    reviewer='user';await saveDefaultPermissionMode(dir+'/data','manual');
     await http(`/threads/${(external.thread as Obj).id}/turns`,{text:'approve',attachments:[]});
     assert.equal(calls.filter(c=>c.method==='turn/start').at(-1)!.params.approvalsReviewer,'user');
-    reviewer='auto_review';
+    reviewer='auto_review';await saveDefaultPermissionMode(dir+'/data','auto');
     const active=await(await http(`/threads/${(external.thread as Obj).id}/open`,{})).json();
     assert.equal(active.thread.approvalsReviewer,'auto_review');assert.equal(active.thread.status.type,'active');assert.equal(active.requests.length,1);
     assert.ok(calls.some(c=>c.method==='turn/settings/update'&&c.params.approvalsReviewer==='auto_review'));
-    reviewer='user';ignoreUpdate=true;
+    reviewer='user';await saveDefaultPermissionMode(dir+'/data','manual');ignoreUpdate=true;
     assert.equal((await http(`/threads/${thread.id}/open`,{})).status,502);
-    reviewer='auto_review';ignoreUpdate=false;
+    reviewer='auto_review';await saveDefaultPermissionMode(dir+'/data','auto');ignoreUpdate=false;
     const inject = async (params: Obj) => {
       adapter.emit('request', { id: 'controlled', method: 'item/commandExecution/requestApproval', params: { threadId: thread.id, turnId: 'turn', ...params } });
       const snapshot = await (await http(`/threads/${thread.id}`)).json();

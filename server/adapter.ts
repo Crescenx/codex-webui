@@ -62,7 +62,7 @@ export class AppServer extends EventEmitter {
     };
     child.once('error', failed);
     child.once('exit', () => failed(new Error('Codex process exited; previous actions will not be replayed')));
-    await this.raw('initialize', { clientInfo: { name: 'codex_viewer', title: 'Codex Viewer', version: '0.2.0' }, capabilities: { experimentalApi: true } });
+    await this.raw('initialize', { clientInfo: { name: 'codex_viewer', title: 'Codex Viewer', version: '0.2.0' }, capabilities: { experimentalApi: true, optOutNotificationMethods: ['native/event'] } });
     this.send({ method: 'initialized' });
     this.emit('online');
   }

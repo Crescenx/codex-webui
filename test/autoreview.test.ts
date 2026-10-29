@@ -1,0 +1,62 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtemp,rm} from 'node:fs/promises';
+import path from 'node:path';
+import {AppServer} from '../server/adapter.ts';
+import {serve} from '../server/main.ts';
+import {autoReviewFailure} from '../shared/auto-review.ts';
+import {readDefaultPermissionMode,readPermissionMode} from '../server/permissions.ts';
+import type {Obj} from '../shared/protocol.ts';
+
+test('review failure detection uses native review events, distinguishes denial and ignores cancellation',()=>{
+ const base={threadId:'a',turnId:'t',reviewId:'r'};
+ const event=(p:Obj)=>({method:'item/autoApprovalReview/completed',params:{...base,...p}});
+ assert.equal(autoReviewFailure(event({review:{status:'denied',rationale:'at capacity',riskLevel:null,userAuthorization:null}}))?.kind,'error');
+ assert.equal(autoReviewFailure(event({review:{status:'denied',rationale:'unsafe',riskLevel:'high',userAuthorization:'low'}}))?.kind,'denied');
+ for(const reason of ['at capacity','review transport failed','invalid JSON','deadline exceeded'])assert.equal(autoReviewFailure(event({result:{error:reason},allowed:false}))?.reason,reason);
+ for(const p of [{review:{status:'approved'}},{review:{status:'aborted'}},{result:{error:'review cancelled'}},{result:{error:'authorization stale'}}])assert.equal(autoReviewFailure(event(p)),undefined);
+ assert.equal(autoReviewFailure({method:'turn/completed',params:{...base,error:'at capacity'}}),undefined);
+});
+for(const runtime of ['codex','antigravity'] as const)test(runtime+': default auto, failure consent, active stop, no replay, isolated override',async()=>{
+ const dir=await mkdtemp('/tmp/viewer-autoreview-');
+ const native=new AppServer({command:process.execPath,args:[path.resolve('test/fake-codex.ts')]});
+ const original=native.call.bind(native),calls:{method:string;params:Obj}[]=[];
+ native.call=async(method,params={})=>{calls.push({method,params});const r=await original(method,params);if(method==='config/read')return {...r,config:{...(r.config as Obj),approvals_reviewer:'user'}};return r;};
+ const app=await serve({roots:[dir],dataDir:dir+'/data',runtimeDir:dir+'/run',port:0,...(runtime==='codex'?{adapter:native}:{adapter:new AppServer({command:process.execPath,args:[path.resolve('test/fake-codex.ts')]}),antigravity:native})});
+ try{
+  const cookie=(await fetch(app.launchUrl,{redirect:'manual'})).headers.get('set-cookie')!.split(';')[0];
+  const request=(route:string,data?:unknown,method=data===undefined?'GET':'POST')=>fetch(app.origin+'/api'+route,{method,headers:{cookie,origin:app.origin,'content-type':'application/json'},...(data===undefined?{}:{body:JSON.stringify(data)})});
+  assert.equal((await fetch(app.origin+'/api/permissions/default')).status,401);
+  assert.equal((await request('/permissions/default',{})).status,405);
+  assert.equal((await request('/permissions/default',{mode:'bypass'},'PUT')).status,400);
+  assert.equal((await(await request('/permissions/default')).json()).mode,'auto');
+  const {thread}=await(await request('/threads',{cwd:dir,model:runtime==='codex'?'mock':'antigravity/mock'})).json();
+  assert.equal(calls.findLast(c=>c.method==='thread/start')?.params.approvalsReviewer,'auto_review');
+  const route='/threads/'+thread.id;
+  await request(route+'/turns',{text:'long-stream',attachments:[]});
+  const snap=await(await request(route)).json(),turnId=snap.thread.turns.at(-1).id;
+  const event={method:'item/autoApprovalReview/completed',params:{threadId:thread.id.replace(/^agy:/,''),turnId,reviewId:'failed-1',...(runtime==='codex'?{review:{status:'denied',rationale:'at capacity',riskLevel:null,userAuthorization:null}}:{result:{error:'at capacity'},allowed:false})}};
+  native.emit('notice',event);
+  assert.equal((await(await request(route+'/permissions')).json()).failure.reason,'at capacity');
+  assert.equal((await(await request(route)).json()).thread.autoReviewFailure.id,'failed-1');
+  assert.equal(await readPermissionMode(dir+'/data',thread.id),null);
+  assert.equal((await request(route+'/permissions/fallback',{failureId:'stale',mode:'bypass'})).status,409);
+  await native.call('mock/goal',{threadId:thread.id.replace(/^agy:/,''),objective:'test pause',status:'active'});
+  const before=calls.filter(c=>c.method==='turn/start').length;
+  const workingCall=native.call.bind(native);native.call=async(method,params={})=>{if(method==='turn/interrupt')throw Error('interrupt rejected');return workingCall(method,params);};
+  assert.notEqual((await request(route+'/permissions/fallback',{failureId:'failed-1',mode:'bypass'})).status,200);assert.equal(await readPermissionMode(dir+'/data',thread.id),null);native.call=workingCall;
+  const switched=await request(route+'/permissions/fallback',{failureId:'failed-1',mode:'manual'});assert.equal(switched.status,200,await switched.text());
+  assert.equal((await(await request(route+'/goal')).json()).goal.status,'paused');
+  assert.ok(calls.some(c=>c.method==='turn/interrupt'));assert.equal(calls.filter(c=>c.method==='turn/start').length,before);
+  assert.equal(await readPermissionMode(dir+'/data',thread.id),'manual');
+  assert.equal((await request(route+'/permissions/fallback',{failureId:'failed-1',mode:'bypass'})).status,409);
+  await request(route+'/turns',{text:'long-stream',attachments:[]});assert.equal(calls.findLast(c=>c.method==='turn/start')?.params.approvalsReviewer,'user');
+  native.emit('notice',{...event,params:{...event.params,reviewId:'failed-2'}});
+  assert.equal((await request(route+'/permissions/fallback',{failureId:'failed-2',mode:'bypass'})).status,200);
+  await request(route+'/turns',{text:'long-stream',attachments:[]});const sent=calls.findLast(c=>c.method==='turn/start')!.params;assert.deepEqual(sent.sandboxPolicy,{type:'dangerFullAccess'});assert.equal(sent.approvalPolicy,'never');
+  await request(route+'/interrupt',{});
+  await request('/permissions/default',{mode:'manual'},'PUT');assert.equal(await readDefaultPermissionMode(dir+'/data'),'manual');
+  const another=await(await request('/threads',{cwd:dir,model:runtime==='codex'?'mock':'antigravity/mock'})).json();assert.equal(calls.findLast(c=>c.method==='thread/start')?.params.approvalsReviewer,'user');assert.equal((await(await request('/threads/'+another.thread.id+'/permissions')).json()).mode,null);
+  assert.equal(await readPermissionMode(dir+'/data',thread.id),'bypass');
+ }finally{await app.stop();await rm(dir,{recursive:true,force:true});}
+});

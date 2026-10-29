@@ -8,7 +8,9 @@ Windows 浏览器里的本地 Codex 工作台；Node.js 和 `codex app-server` �
 
 先在相邻 `../antigravity-acp-exoskeleton` 构建后端。Viewer 自动查找 `target/release/antigravity-app-server`、`target/debug/antigravity-app-server`，最后兼容旧 `target/debug/antigravity-harness`；也可用 `VIEWER_AGY_BINARY` 指定明确的二进制路径。未安装时继续使用 Codex。
 
-原生 runtime 使用 `AGY_EXTERNAL_BINARY`，默认 `~/.local/opt/antigravity-acp/1.4.0/localharness_external`。认证使用 `GEMINI_API_KEY` 或 `AGY_PERSONAL_CREDENTIALS`；未设置 API key 时默认读取 `~/.gemini/antigravity-acp/acp_token.json`。Viewer 将后端状态固定在自己的数据目录 `antigravity-app-server/`，不复用其他客户端的状态目录。
+原生 runtime 使用 App 2.24.0 的 `language_server`，由后端严格校验哈希。`AGY_APP_CORE_BINARY` 默认指向 `~/.local/opt/antigravity-app/2.24.0/language_server`。Viewer 将后端状态固定在自己的数据目录 `antigravity-app-server/`；`AGY_APP_AUTH_HOME` 默认是该目录下的 `app-auth/`，独立标题进程共享认证目录，但使用自己的临时会话目录。首次使用须按后端 README 完成原生 `--login`，登录与 Viewer 使用相同的认证目录。旧 `AGY_EXTERNAL_BINARY`、`AGY_PERSONAL_CREDENTIALS` 和 API key 不再用于模型执行。
+
+旧 SDK 创建的 `agy:` 会话保留为只读历史，不尝试续跑；界面提示新建会话。新 App core 会话支持原生恢复。构建和配置更新不会自动重启正在运行的 Viewer。
 
 模型及思考档位来自后端账户目录。Google 会话支持 Plan、执行中追加、Goal、Skills 和子任务；切换后启动 Goal 会先注入历史，无需额外用户轮次。Google／外部模型分别显示 5 小时和 7 天额度，缺失窗口显示未知；Codex 保留原有周额度与重置卡。单个后端的列表或额度读取失败会单独显示，并保留另一个后端的结果。自动审批由后端 Guardian 执行，默认会调用 Codex 审批模型并使用其额度。
 
@@ -46,6 +48,7 @@ npm start -- --root /home/andantex/projects
 
 ## 功能与边界
 
+- 数学宏随材料上下文渲染：从当前会话先前的用户文本、成功工具输出中提取 `\newcommand`、`\renewcommand`、`\providecommand`、`\DeclareMathOperator` 和简单 `\def` / `\gdef` 声明，按出现顺序建立每条回复的默认宏环境；不自动读取文件，不跨会话共享，也不让后续定义改变旧回复。公式内显式定义优先，缓存包含宏上下文。未知宏或 KaTeX 不支持的语法保留公式源码并在悬停时说明原因，不猜测数学含义；不支持完整 LaTeX 文档编译、任意宏包或带默认可选参数的 `\newcommand`。
 - GFM Markdown、表格、代码和 KaTeX。行内公式支持 `$…$` / `\(…\)`，独立公式支持 `$$…$$` / `\[…\]`；代码和链接地址不按括号公式解析。未闭合的括号公式先显示原文，闭合后排版；分隔符扫描上限 32768 字符，超长输入退回文本。不注入模型提示词，不改写历史。完整回复的“复制 Markdown”保留原文；“复制代码”复制整块纯代码。代码块内选区仅复制选中文字，保留缩进和换行，不添加围栏；跨正文选择时完整覆盖的代码块保留原始围栏，部分覆盖只复制所选代码。公式、行内代码和链接保留原始源码分隔符；普通文本不补回粗体等标记。
 - 文件选择、拖放、截图粘贴；PNG/JPEG/WebP 显示缩略图并通过 `localImage` 发送，其他文件通过 WSL 文件路径交给 Codex。不自动运行上传内容。每轮最多 10 个、单文件 25 MiB、总空间 512 MiB。
 - 单次批准、拒绝、取消、问题回答，并独立显示审批原因和操作范围。检测到 Windows 路径或程序的审批会显示命中依据，并在卡片上一次确认，不再弹出第二个确认窗口；“持续授权选项”按 Codex 提供的范围显示本会话授权、保存命令前缀规则或主机网络规则；保存规则跨会话生效，界面会显示具体前缀或主机。后端只接受当前请求提供的选项，不接受浏览器自拟规则。多行 Python 等原始命令不会因 JSON 换行转义而被误判。

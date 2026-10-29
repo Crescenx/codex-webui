@@ -40,6 +40,56 @@ function setup(nextCursor: string | null = null) {
 }
 const tick = () => new Promise<void>(resolve => setImmediate(resolve));
 
+test('native execution uncertainty gates sends even without a top-level uncertain flag',async()=>{
+  const h=setup();
+  try {
+    await tick();const opening=h.store.selectThread('a');await tick();
+    h.pending.find(p=>p.path==='/threads/a/open')!.job.resolve({...snapshot('a'),thread:{...thread('a'),executionUncertain:true}});
+    await opening;
+    assert.equal(h.store.draft.value?.uncertain,true);assert.equal(h.store.canSend.value,false);
+  } finally {h.store.dispose();}
+});
+
+test('partial model refresh preserves known context capability and clears errors on recovery', async () => {
+  const h=setup();
+  try {
+    await tick();
+    h.held.add('/controls?threadId=a&section=settings');
+    const opening=h.store.selectThread('a');await tick();
+    h.pending.find(p=>p.path==='/threads/a/open')!.job.resolve({...snapshot('a'),thread:{...thread('a'),contextManagement:true}});
+    await opening;await tick();
+    h.pending.findLast(p=>p.path.includes('section=settings'))!.job.resolve({...catalog,models:[{...catalog.models[0],supportsExperimentalContext:true}]});await tick();
+    const d=h.store.state.drafts.a!;
+    h.held.add('/controls?threadId=a&section=settings&refresh=true');
+    const refresh=h.store.loadControls();await tick();
+    h.pending.findLast(p=>p.path.includes('section=settings'))!.job.resolve({...catalog,models:[],errors:{'models:codex':'timeout'}});
+    await refresh;
+    assert.equal(h.store.contextBlocked.value,false);
+    assert.equal(d.catalog.models[0]?.model,'mock');
+    assert.equal(d.catalog.errors['models:codex'],'timeout');
+    const recovery=h.store.loadControls();await tick();
+    h.pending.findLast(p=>p.path.includes('section=settings'))!.job.resolve({...catalog,models:[{...catalog.models[0],supportsExperimentalContext:false}]});
+    await recovery;
+    assert.equal(d.catalog.errors['models:codex'],undefined);
+    assert.equal(h.store.contextBlocked.value,true,'explicitly unsupported models still block sends');
+  } finally { h.store.dispose(); }
+});
+
+test('agent polling leaves completed detail cached while the parent continues',async t=>{
+  t.mock.timers.enable({apis:['setInterval']});
+  const h=setup();
+  try{
+    const opening=h.store.selectThread('a');h.pending[0].job.resolve({...snapshot('a'),thread:{...thread('a'),status:{type:'active'}}});await opening;
+    const child={...thread('child'),parentThreadId:'a',turns:[{id:'done',status:'completed',items:[]}]};
+    h.emit({method:'thread/started',params:{thread:child},seq:1});h.store.selectAgent('child');h.store.setAgentsVisible(true);
+    h.pending.findLast(p=>p.path==='/threads/child?refresh=1')!.job.resolve({...snapshot('child'),thread:child});await tick();
+    const reads=()=>h.calls.filter(p=>p==='/threads/child?refresh=1').length;
+    const before=reads();t.mock.timers.tick(4000);await tick();assert.equal(reads(),before);
+    h.emit({method:'turn/started',params:{threadId:'child',turn:{id:'next',status:'inProgress',items:[]}},seq:2});
+    t.mock.timers.tick(2000);await tick();assert.equal(reads(),before+1);
+  }finally{h.store.dispose();}
+});
+
 
 test('managed Codex snapshots preserve local settings and drafts and gate sends while locked',async()=>{
   const h=setup();
@@ -58,7 +108,7 @@ test('managed Codex snapshots preserve local settings and drafts and gate sends 
 test('creation uses its snapshot and sends with effective settings while optional reads are pending', async () => {
   const h = setup();
   try {
-    await tick(); h.held.add('/threads'); h.held.add('/controls?threadId=new');
+    await tick(); h.held.add('/threads'); h.held.add('/controls?threadId=new&section=settings');
     const creating = h.store.createThread('/tmp/new', { model: 'mock', contextManagement: true });
     h.pending.find(p => p.path === '/threads' && p.data)!.job.resolve({ ...snapshot('new', 1), thread: { ...thread('new'), contextManagement: true }, models: [{ ...catalog.models[0], supportsExperimentalContext: true }] });
     await creating;
@@ -364,9 +414,9 @@ test('skills changes refresh only the current catalog; switching reloads the oth
     const b = h.store.selectThread('b'); h.pending[1].job.resolve(snapshot('b')); await b;
     h.calls.length = 0;
     h.emit({ method: 'skills/changed', params: {}, seq: 1 }); await tick();
-    assert.deepEqual(h.calls, ['/controls?threadId=b']);
+    assert.deepEqual(h.calls, ['/controls?threadId=b&section=settings&refresh=true', '/controls?threadId=b&section=extras&refresh=true']);
     const back = h.store.selectThread('a'); h.pending[2].job.resolve(snapshot('a', 1)); await back;
-    assert.equal(h.calls.filter(p => p.startsWith('/controls')).at(-1), '/controls?threadId=a');
+    assert.equal(h.calls.filter(p => p.startsWith('/controls')).at(-1), '/controls?threadId=a&section=extras');
   } finally { h.store.dispose(); }
 });
 
@@ -536,7 +586,7 @@ test('async question answers require explicit completion, preserve drafts, and d
 });
 
 test('configuration requests and local drafts retain thread ownership across switching', async () => {
-  const h = setup(); h.held.add('/controls?threadId=a');
+  const h = setup(); h.held.add('/controls?threadId=a&section=settings');
   try {
     const a = h.store.selectThread('a'); h.pending[0].job.resolve(snapshot('a')); await a;
     h.store.setText('A draft'); h.store.setSettings({ model: 'mock', effort: 'high', mode: 'plan' });
@@ -630,4 +680,34 @@ test('goal notifications distinguish continuation from completion and replay cle
     if (originalDocument) Object.defineProperty(globalThis, 'document', originalDocument); else Reflect.deleteProperty(globalThis, 'document');
     if (originalNotification) Object.defineProperty(globalThis, 'Notification', originalNotification); else Reflect.deleteProperty(globalThis, 'Notification');
   }
+});
+
+test('slow extras do not gate settings; refresh failures retain usable options and drafts', async () => {
+  const h = setup(); h.held.add('/controls?threadId=a&section=extras');
+  try {
+    const opening = h.store.selectThread('a'); h.pending[0].job.resolve(snapshot('a')); await opening; await tick();
+    assert.equal(h.store.draft.value?.loading, false);
+    assert.equal(h.store.draft.value?.extrasLoading, true);
+    h.store.setText('keep text'); h.store.setSettings({model:'mock',effort:null,mode:'default'});
+    assert.equal(h.store.canSend.value, true);
+    h.held.add('/controls?threadId=a&section=settings&refresh=true');
+    const refreshing = h.store.loadControls(); await tick();
+    assert.equal(h.store.draft.value?.loading, false);
+    assert.equal(h.store.canSend.value, true);
+    h.pending.find(p=>p.path.endsWith('section=settings&refresh=true'))!.job.reject(new Error('temporary failure'));
+    await refreshing;
+    h.pending.find(p=>p.path.endsWith('section=extras'))!.job.resolve({...catalog,skills:[{name:'stale',path:'/stale',enabled:true}]});await tick();
+    assert.equal(h.store.draft.value?.catalog.models[0].model, 'mock');
+    assert.deepEqual(h.store.draft.value?.catalog.skills, []);
+    assert.equal(h.store.draft.value?.catalog.errors.load, 'temporary failure');
+    assert.equal(h.store.draft.value?.text, 'keep text');
+  } finally { h.store.dispose(); }
+});
+
+test('read-only historical threads preserve drafts and never send',async()=>{
+ const h=setup();
+ try{
+  const opening=h.store.selectThread('a');h.pending[0].job.resolve({...snapshot('a'),thread:{...snapshot('a').thread,readOnly:true}});await opening;await tick();
+  h.store.setText('keep this draft');assert.equal(h.store.canSend.value,false);assert.equal(await h.store.send(),false);assert.equal(h.store.draft.value?.text,'keep this draft');
+ }finally{h.store.dispose();}
 });

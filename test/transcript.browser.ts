@@ -47,6 +47,52 @@ const anchor = (page: Page) => page.locator('#conversation').evaluate(el => {
   return { key: row?.dataset.rowKey, inset: top - (row?.getBoundingClientRect().top || 0) };
 });
 
+test('opening history with an overflowing unmeasured user message settles at the latest reply', async ({ page }) => {
+  const h = await fixture(page, 2), thread = h.threads[0]!;
+  thread.turns![1]!.items[0]!.content = [{ type: 'text', text: 'diagnostic log line\n'.repeat(500) }];
+  try {
+    await switchTo(page, thread.id, 2);
+    await expect.poll(() => page.locator('#conversation').evaluate(el =>
+      Math.abs(el.scrollHeight - el.clientHeight - el.scrollTop))).toBeLessThan(3);
+    await page.setViewportSize({ width: 1920, height: 900 });
+    await expect.poll(() => page.locator('#conversation').evaluate(el =>
+      Math.abs(el.scrollHeight - el.clientHeight - el.scrollTop))).toBeLessThan(3);
+    await page.locator('#prompt').fill('still responsive');
+    await expect(page.locator('#prompt')).toHaveValue('still responsive');
+    await switchTo(page, h.threads[1]!.id, 2);
+  } finally { await h.stop(); }
+});
+
+test('long Markdown parses in a worker and streamed append preserves existing blocks',async({page},info)=>{
+  const h=await fixture(page,1),thread=h.threads[0]!;
+  thread.turns=[{id:'stream',status:'inProgress',items:[{id:'answer',type:'agentMessage',text:'Stable opening paragraph.'}]}];
+  let workers=0;page.on('worker',()=>workers++);
+  try{
+    await page.locator(`[data-thread-id="${thread.id}"]`).click();
+    const body=page.locator('#conversation .assistant .markdown');
+    await expect(body).toContainText('Stable opening paragraph.');
+    await body.evaluate(el=>Object.assign(window,{stableParagraph:el.firstChild,markdownLongTasks:[]}));
+    await page.evaluate(()=>{
+      const state=window as typeof window & {markdownLongTasks:number[]};
+      const observer=new PerformanceObserver(list=>state.markdownLongTasks.push(...list.getEntries().map(entry=>entry.duration)));
+      observer.observe({type:'longtask'});Object.assign(window,{markdownObserver:observer});
+    });
+    const appendix='\n\n'+Array.from({length:40},(_,i)=>`Paragraph ${i}: ${'editable text with **emphasis**, '.repeat(80)} $x^2$.\n\n`).join('')+'LATEST_MARKER';
+    h.adapter.emit('notice',{method:'item/agentMessage/delta',params:{threadId:thread.id,turnId:'stream',itemId:'answer',delta:appendix}});
+    await page.locator('#prompt').fill('Input remains editable during Markdown work.');
+    await expect(body).toContainText('LATEST_MARKER');
+    expect(await body.evaluate(el=>el.firstChild===(window as typeof window & {stableParagraph:Node}).stableParagraph)).toBe(true);
+    expect(workers).toBeGreaterThan(0);
+    const durations=await page.evaluate(()=>{
+      const state=window as typeof window & {markdownLongTasks:number[];markdownObserver:PerformanceObserver};
+      state.markdownObserver.disconnect();return state.markdownLongTasks;
+    });
+    await info.attach('markdown-main-thread.json',{body:JSON.stringify({chars:appendix.length,longTasks:durations}),contentType:'application/json'});
+    expect(Math.max(0,...durations)).toBeLessThan(200);
+    await expect(page.locator('#prompt')).toHaveValue('Input remains editable during Markdown work.');
+  }finally{await h.stop();}
+});
+
 test('folding a long active trace leaves no empty height between messages', async ({page},testInfo)=>{
   const h=await fixture(page,1),a=h.threads[0]!;
   const turn={id:'long-trace',status:'inProgress',items:[
@@ -151,6 +197,8 @@ test('trace opens while working, folds on reply, and keeps manual expansion acro
     await toggle.click(); await expect(toggle).toHaveAttribute('aria-expanded', 'false');
     await expect(page.locator('#conversation .activity')).toHaveCount(0);
     await toggle.click(); await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    // Automatic folding applies only after explicitly resuming live following.
+    await page.locator('#latest').click();
     await page.screenshot({ path: testInfo.outputPath('trace-active-1920.png') });
     notice('item/started', { item: { id: 'reply', type: 'agentMessage', text: '' } });
     await expect(toggle).toHaveAttribute('aria-expanded', 'true');
@@ -174,7 +222,7 @@ test('trace opens while working, folds on reply, and keeps manual expansion acro
     await expect(page.locator('#conversation .trace-toggle')).toHaveCount(2);
     await expect(next).toHaveAttribute('aria-expanded', 'true');
     notice('turn/completed', { turn: { id: turn.id, status: 'completed', items: [] } });
-    await expect(next).toHaveAttribute('aria-expanded', 'false');
+    await expect(next).toHaveAttribute('aria-expanded', 'true');
     await expect(toggle).toHaveAttribute('aria-expanded', 'true');
     notice('turn/started', { turn: { id: 'large-trace', status: 'inProgress', items: Array.from({ length: 300 }, (_, i) => ({ id: `step-${i}`, type: 'commandExecution', command: `check step-${i}`, status: 'completed' })) } });
     await page.locator('#latest').click();
@@ -236,12 +284,117 @@ test('reasoning groups keep native search anchors, reading position and selectio
   } finally { await h.stop(); }
 });
 
+test('scrolling through async Markdown does not shift already visible text', async ({ page }) => {
+  await page.addInitScript(() => {
+    const send = Worker.prototype.postMessage;
+    Worker.prototype.postMessage = function (message: unknown) {
+      setTimeout(() => send.call(this, message), 100);
+    };
+  });
+  const h = await fixture(page, 100);
+  // Earlier messages in the same active turn are also asynchronously rendered.
+  h.threads[0]!.turns!.forEach(turn => { turn.status = 'inProgress'; });
+  try {
+    await switchTo(page, h.threads[0]!.id, 100);
+    const conversation = page.locator('#conversation');
+    await expect(conversation.locator('[data-layout-pending]')).toHaveCount(0);
+    await page.waitForTimeout(300);
+    await conversation.hover();
+    const shifts: number[] = [];
+    for (let i = 0; i < 24; i++) {
+      const delta = i < 12 ? -360 : 360;
+      const before = await conversation.evaluate(el => {
+        const top = el.getBoundingClientRect().top;
+        const row = [...el.querySelectorAll<HTMLElement>('[data-row-key]')].find(row => row.getBoundingClientRect().top > top + 100)!;
+        return { key: row.dataset.rowKey!, top: row.getBoundingClientRect().top };
+      });
+      await conversation.evaluate((el, { key, expected }) => {
+        const samples: number[] = [];
+        const done = new Promise<number[]>(resolve => {
+          el.addEventListener('scroll', () => {
+            const start = performance.now();
+            function sample() {
+              const row = [...el.querySelectorAll<HTMLElement>('[data-row-key]')].find(row => row.dataset.rowKey === key);
+              if (row) samples.push(Math.abs(row.getBoundingClientRect().top - expected));
+              if (performance.now() - start < 350) requestAnimationFrame(sample); else resolve(samples);
+            }
+            requestAnimationFrame(sample);
+          }, { once: true });
+        });
+        Object.assign(window, { scrollSamples: done });
+      }, { key: before.key, expected: before.top - delta });
+      await page.mouse.wheel(0, delta);
+      if (i > 1 && i < 20) h.adapter.emit('notice', { method: 'item/agentMessage/delta', params: { threadId: h.threads[0]!.id, turnId: 'turn-99', itemId: 'answer', delta: '\n\nStill generating output.' } });
+      const samples = await page.evaluate(() => (window as unknown as { scrollSamples: Promise<number[]> }).scrollSamples);
+      const after = await conversation.locator(`[data-row-key="${before.key}"]`).evaluate(el => el.getBoundingClientRect().top);
+      shifts.push(Math.max(...samples, Math.abs(after - before.top + delta)));
+    }
+    expect(Math.max(...shifts), JSON.stringify(shifts)).toBeLessThan(4);
+  } finally { await h.stop(); }
+});
+
+test('new streamed answer does not fold tools being read above it', async ({ page }) => {
+  const h = await fixture(page, 1), thread = h.threads[0]!;
+  thread.turns = [{ id: 'active', status: 'inProgress', items: [
+    { id: 'user', type: 'userMessage', content: [{ type: 'text', text: 'Inspect tools' }] },
+    ...Array.from({ length: 60 }, (_, i) => ({ id: `cmd-${i}`, type: 'commandExecution', command: `check ${i}`, status: 'completed', aggregatedOutput: 'done', exitCode: 0 })),
+  ] }];
+  try {
+    await page.locator(`[data-thread-id="${thread.id}"]`).click();
+    await expect(page.locator('#conversation .activity-title').last()).toContainText('check 59');
+    const conversation = page.locator('#conversation');
+    await conversation.hover(); await page.mouse.wheel(0, -650);
+    await expect(page.locator('#latest')).toBeVisible();
+    await page.waitForTimeout(300);
+    const before = await anchor(page);
+    h.adapter.emit('notice', { method: 'item/started', params: { threadId: thread.id, turnId: 'active', item: { id: 'answer', type: 'agentMessage', text: '' } } });
+    for (let i = 0; i < 8; i++) {
+      h.adapter.emit('notice', { method: 'item/agentMessage/delta', params: { threadId: thread.id, turnId: 'active', itemId: 'answer', delta: '\n\nNew output '.repeat(40) } });
+      await page.waitForTimeout(40);
+    }
+    const after = await anchor(page);
+    expect(after.key).toBe(before.key);
+    expect(Math.abs(after.inset - before.inset)).toBeLessThan(3);
+    expect(await conversation.locator('.virtual-row').count()).toBeLessThan(30);
+    await page.locator('#latest').click();
+    await expect.poll(() => conversation.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThan(3);
+  } finally { await h.stop(); }
+});
+
+test('upward reading stays anchored when offscreen content finishes layout', async ({ page }) => {
+  const h = await fixture(page, 200);
+  try {
+    await switchTo(page, h.threads[0]!.id, 200);
+    const conversation = page.locator('#conversation');
+    await conversation.hover();
+    await page.mouse.wheel(0, -650);
+    await page.waitForTimeout(500);
+    await page.mouse.wheel(0, -40);
+    await page.waitForTimeout(40);
+    const before = await anchor(page);
+    // Model a delayed image/Markdown layout in a mounted overscan row.
+    await conversation.evaluate(el => {
+      const top = el.getBoundingClientRect().top;
+      const row = [...el.querySelectorAll<HTMLElement>('[data-row-key]')].find(row => row.getBoundingClientRect().bottom < top);
+      if (!row) throw new Error('No overscan row above viewport');
+      row.style.paddingBottom = '240px';
+    });
+    await page.waitForTimeout(250);
+    const after = await anchor(page);
+    expect(after.key).toBe(before.key);
+    expect(Math.abs(after.inset - before.inset)).toBeLessThan(3);
+    expect(await conversation.locator('.virtual-row').count()).toBeLessThan(25);
+  } finally { await h.stop(); }
+});
+
 test('scrolling up after returning to latest stays under user control', async ({ page }) => {
   const h = await fixture(page, 1000);
   try {
     await switchTo(page, h.threads[0]!.id, 1000);
     const conversation = page.locator('#conversation');
     const gap = () => conversation.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop);
+    await expect(conversation.locator('[data-layout-pending]')).toHaveCount(0);
+    await expect.poll(gap).toBeLessThan(3);
     for (let i = 0; i < 3; i++) {
       await conversation.hover();
       await page.mouse.wheel(0, -40);

@@ -19,7 +19,11 @@ const store = createViewerStore(); provide(viewerKey, store);
 const transcriptMemory = createTranscriptMemory(); provide(transcriptMemoryKey, transcriptMemory);
 const { current, draft, approvals } = store;
 const folder = ref<InstanceType<typeof FolderDialog>>(), name = ref<InstanceType<typeof NameDialog>>(), skills = ref<InstanceType<typeof SkillsDialog>>();
-const error = computed(() => store.state.error || draft.value?.error || draft.value?.readError || (current.value?.turns?.at(-1)?.error ? JSON.stringify(current.value.turns.at(-1)!.error) : ''));
+const error = computed(() => {
+  const detail=current.value?.turns?.at(-1)?.error;
+  const message=detail && typeof detail==='object' && 'message' in detail ? String(detail.message) : detail ? String(detail) : '';
+  return store.state.error || draft.value?.error || draft.value?.readError || (message==='Native outcome unknown; input was not replayed' ? '上一轮执行结果未知，旧消息未重发。' : message);
+});
 const conversation=ref<InstanceType<typeof Conversation>>();
 const sidebarWidth = ref(280), sidebarCollapsed = ref(false), resizing = ref(false);
 const sidebarVisible = computed(() => !sidebarCollapsed.value);
