@@ -164,23 +164,24 @@ test('Git grouping and file preview enforce root, type and line boundaries',asyn
   }finally{await rm(dir,{recursive:true,force:true});}
 });
 test('default application launch converts WSL paths without line suffixes or shell interpolation and reports failures', async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'viewer-opener-')), command = path.join(dir, 'powershell.exe'), convert = path.join(dir, 'wslpath'), capture = path.join(dir, 'arguments.json');
-  const previousPath = process.env.PATH, previousDistro = process.env.WSL_DISTRO_NAME;
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'viewer-opener-')), command = path.join(dir, 'pwsh.exe'), convert = path.join(dir, 'wslpath'), capture = path.join(dir, 'arguments.json');
+  const previousPath = process.env.PATH, previousDistro = process.env.WSL_DISTRO_NAME, previousPwsh = process.env.VIEWER_PWSH;
   const file = { path: '/tmp/中文 space "$()".pdf', line: 12, column: 3 };
   const windowsPath = '\\\\wsl.localhost\\Ubuntu\\tmp\\中文 space \'$() & [1].pdf';
   try {
     await writeFile(convert, '#!' + process.execPath + '\nrequire("node:assert/strict").deepEqual(process.argv.slice(2),' + JSON.stringify(['-w',file.path]) + '); process.stdout.write(' + JSON.stringify(windowsPath) + ');\n');
     await chmod(convert, 0o700);
     await writeFile(command, '#!' + process.execPath + '\nrequire("node:fs").writeFileSync(' + JSON.stringify(capture) + ',JSON.stringify(process.argv.slice(2))); process.stdout.write("x".repeat(32768)); process.stderr.write("launcher warning");\n');
-    await chmod(command, 0o700); process.env.PATH = dir; process.env.WSL_DISTRO_NAME = 'Ubuntu';
+    await chmod(command, 0o700); process.env.PATH = dir; process.env.WSL_DISTRO_NAME = 'Ubuntu'; delete process.env.VIEWER_PWSH;
     await openDefault(file);
     const args = JSON.parse(await readFile(capture, 'utf8'));
-    assert.deepEqual(args.slice(0,3), ['-NoProfile','-NonInteractive','-EncodedCommand']);
-    const script = Buffer.from(args[3],'base64').toString('utf16le');
+    assert.deepEqual(args.slice(0,4), ['-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand']);
+    const script = Buffer.from(args[4],'base64').toString('utf16le');
     assert.match(script,/Start-Process -FilePath/);assert.doesNotMatch(script,/--goto|:12:3|中文|-Wait/);
     assert.equal(Buffer.from(/FromBase64String\('([^']+)'\)/.exec(script)![1],'base64').toString(),windowsPath);
+    process.env.VIEWER_PWSH = command;
     await openDefault(file,true);
-    const revealArgs=JSON.parse(await readFile(capture,'utf8')),revealScript=Buffer.from(revealArgs[3],'base64').toString('utf16le');
+    const revealArgs=JSON.parse(await readFile(capture,'utf8')),revealScript=Buffer.from(revealArgs[4],'base64').toString('utf16le');
     assert.match(revealScript,/Start-Process -FilePath explorer\.exe -ArgumentList/);assert.ok(revealScript.includes('/select,"'));
     assert.equal(Buffer.from(/FromBase64String\('([^']+)'\)/.exec(revealScript)![1],'base64').toString(),windowsPath);
     await writeFile(command, '#!' + process.execPath + '\nprocess.exit(7);\n');
@@ -189,6 +190,7 @@ test('default application launch converts WSL paths without line suffixes or she
   } finally {
     if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
     if (previousDistro === undefined) delete process.env.WSL_DISTRO_NAME; else process.env.WSL_DISTRO_NAME = previousDistro;
+    if (previousPwsh === undefined) delete process.env.VIEWER_PWSH; else process.env.VIEWER_PWSH = previousPwsh;
     await rm(dir, { recursive: true, force: true });
   }
 });

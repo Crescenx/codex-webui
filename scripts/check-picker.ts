@@ -10,8 +10,9 @@ const start = (await run('wslpath', ['-w', process.cwd()])).stdout.trim();
 const source = await readFile(new URL('../server/files.ts', import.meta.url), 'utf8');
 const template = source.match(/const script = `([\s\S]*?)`;/)![1];
 const script = '[Console]::WriteLine("PID="+$PID);' + template.replace("${Buffer.from(start).toString('base64')}", Buffer.from(start).toString('base64'));
-const command = (text: string) => ['-NoProfile', '-STA', '-EncodedCommand', Buffer.from(text, 'utf16le').toString('base64')];
-const pending = run('powershell.exe', command(script), { timeout: 20000, maxBuffer: 16384 });
+const command = (text: string) => ['-NoLogo', '-NoProfile', '-NonInteractive', '-STA', '-EncodedCommand', Buffer.from(text, 'utf16le').toString('base64')];
+const executable = process.env.VIEWER_PWSH || 'pwsh.exe';
+const pending = run(executable, command(script), { timeout: 20000, maxBuffer: 16384 });
 pending.catch(() => {});
 let output = '', pid: string | undefined;
 pending.child.stdout!.on('data', chunk => { output += chunk; });
@@ -56,12 +57,12 @@ for ($attempt = 0; $attempt -lt 30; $attempt++) {
 }
 throw 'Native picker did not appear'
 `;
-  const result = await run('powershell.exe', command(inspect), { timeout: 15000, maxBuffer: 16384 });
+  const result = await run(executable, command(inspect), { timeout: 15000, maxBuffer: 16384 });
   assert.deepEqual(JSON.parse(result.stdout), { visible: true, topmost: true });
   assert.equal((await pending).stdout.replace(/PID=\d+\s*/, '').trim(), '');
   console.log('Native WSL picker is visible, on top, and cancels cleanly.');
 } finally {
   pending.child.kill();
-  if (pid) await run('powershell.exe', command(`Stop-Process -Id ${pid} -ErrorAction SilentlyContinue`), { timeout: 5000 }).catch(() => {});
+  if (pid) await run(executable, command(`Stop-Process -Id ${pid} -ErrorAction SilentlyContinue`), { timeout: 5000 }).catch(() => {});
   await pending.catch(() => {});
 }

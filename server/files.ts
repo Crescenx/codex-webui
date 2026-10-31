@@ -44,7 +44,7 @@ $dialog.SelectedPath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64Stri
 try { if ($dialog.ShowDialog($owner) -eq [Windows.Forms.DialogResult]::OK) { [Console]::Write($dialog.SelectedPath) } }
 finally { $timer.Dispose(); $dialog.Dispose(); $owner.Dispose() }
 `;
-    const { stdout } = await exec('powershell.exe', ['-NoProfile', '-STA', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { timeout: 120000, maxBuffer: 16384, signal });
+    const { stdout } = await exec(process.env.VIEWER_PWSH || 'pwsh.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-STA', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { timeout: 120000, maxBuffer: 16384, signal });
     return stdout.trim() || null;
   } catch (error) {
     if (signal?.aborted) throw error;
@@ -115,7 +115,7 @@ export async function openDefault(file:{path:string;line:number;column:number},r
       // Pass only encoded path data to PowerShell; line/column belong to the text preview.
       const script=`$ErrorActionPreference = 'Stop'\n$target = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(target).toString('base64')}'))\n`+
         (reveal?`Start-Process -FilePath explorer.exe -ArgumentList ('/select,"' + $target + '"')`:'Start-Process -FilePath $target');
-      await exec('powershell.exe',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],options);
+      await exec(process.env.VIEWER_PWSH || 'pwsh.exe',['-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],options);
     } else if(process.platform==='darwin')await exec('open',reveal?['-R',file.path]:[file.path],options);
     else await exec('xdg-open',[reveal?path.dirname(file.path):file.path],options);
   } catch (error) {
