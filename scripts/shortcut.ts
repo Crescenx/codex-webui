@@ -8,7 +8,7 @@ if (!distro) throw new Error('Install the Windows shortcut from inside WSL.');
 const iconOnly = process.argv.includes('--icon-only');
 const iconSource = execFileSync('wslpath', ['-w', fileURLToPath(new URL('../web/assets/icon.ico', import.meta.url))], { encoding: 'utf8' }).trim();
 const launcher = String.raw`& $env:WINDIR\System32\wsl.exe -d ${psQuote(distro)} -u ${psQuote(os.userInfo().username)} -e ${psQuote(process.execPath)} ${psQuote(fileURLToPath(new URL('open.ts', import.meta.url)))};if($LASTEXITCODE){Add-Type -AssemblyName System.Windows.Forms;[Windows.Forms.MessageBox]::Show('Codex Viewer failed to start')}`;
-const args = '-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand ' + Buffer.from(launcher, 'utf16le').toString('base64');
+const args = '-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand ' + Buffer.from(launcher, 'utf16le').toString('base64');
 // ponytail: WScript truncates arguments at 1023 characters; use a separate launcher file if paths outgrow this.
 if (args.length > 1023) throw new Error('Paths are too long for the Windows shortcut command. Use a shorter project/Node path.');
 // EncodedCommand carries literal paths without a .ps1 file or an execution-policy change.
@@ -31,7 +31,7 @@ Copy-Item -LiteralPath ${psQuote(iconSource)} -Destination $icon -Force
 foreach ($path in $paths) {
   $shortcut = $shell.CreateShortcut($path)
   if (${iconOnly ? '$false' : '$true'}) {
-  $shortcut.TargetPath = "$env:WINDIR\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+  $shortcut.TargetPath = (Get-Process -Id $PID).Path
   $shortcut.Arguments = ${psQuote(args)}
   $shortcut.WorkingDirectory = $env:USERPROFILE
   $shortcut.Description = 'Start Codex Viewer in WSL and open it in your browser'

@@ -9,12 +9,7 @@ export async function obsidianCli(vault: string, args: string[], executable='C:\
   const powershellArgs=['-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')];
   const options={timeout:30000,maxBuffer:2000000};
   try {
-    try { return await exec('pwsh.exe',powershellArgs,options); }
-    catch(error) {
-      if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;
-      // shortcut: this WSL installation uses cresc's WindowsApps alias; update if the Windows account moves.
-      return await exec('/mnt/c/Users/cresc/AppData/Local/Microsoft/WindowsApps/pwsh.exe',powershellArgs,options);
-    }
+    return await exec(process.env.VIEWER_PWSH || 'pwsh.exe',powershellArgs,options);
   } catch(error) {
     const e=error as {killed?:boolean;stderr?:string;code?:string|number;message?:string};
     throw new Error(e.killed?'Obsidian CLI 超时；请检查应用状态，不重放写操作':'Obsidian CLI 执行失败'+(e.code!==undefined?' ['+e.code+']':'')+'：'+(e.stderr||e.message||'请检查 PowerShell 7 和 Obsidian 入口').slice(0,500),{cause:error});

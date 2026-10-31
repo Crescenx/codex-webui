@@ -4,7 +4,30 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { launchUrl, psQuote, waitForViewer } from '../scripts/open.ts';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+import { launchUrl, psQuote, waitForViewer, powershell } from '../scripts/open.ts';
+
+test('Windows launcher uses PowerShell 7 from PATH or the explicit installation path', t => {
+  const saved = process.env.VIEWER_PWSH;
+  let command = '';
+  t.mock.method(childProcess, 'execFileSync', (file: string, args: string[]) => {
+    command = file;
+    assert.deepEqual(args.slice(0, 4), ['-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand']);
+    assert.ok(Buffer.from(args[4], 'base64').toString('utf16le').endsWith('Write-Output VIEWER_OK'));
+    return 'VIEWER_OK\r\n';
+  });
+  syncBuiltinESMExports();
+  try {
+    delete process.env.VIEWER_PWSH;
+    assert.equal(powershell('Write-Output VIEWER_OK'), 'VIEWER_OK'); assert.equal(command, 'pwsh.exe');
+    process.env.VIEWER_PWSH = '/mnt/c/Program Files/PowerShell/7/pwsh.exe';
+    powershell('Write-Output VIEWER_OK'); assert.equal(command, process.env.VIEWER_PWSH);
+  } finally {
+    if (saved === undefined) delete process.env.VIEWER_PWSH; else process.env.VIEWER_PWSH = saved;
+    t.mock.restoreAll(); syncBuiltinESMExports();
+  }
+});
 
 test('launcher opens only a ready local URL, rereading a stale token', async () => {
   const token = 'a'.repeat(43);

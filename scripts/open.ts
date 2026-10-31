@@ -6,8 +6,8 @@ import { pathToFileURL } from 'node:url';
 
 export const psQuote = (value: string) => "'" + value.replaceAll("'", "''") + "'";
 export function powershell(script: string) {
-  return execFileSync('/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe',
-    ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from("$ProgressPreference = 'SilentlyContinue'\n" + script, 'utf16le').toString('base64')],
+  return execFileSync(process.env.VIEWER_PWSH || 'pwsh.exe',
+    ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from("$ProgressPreference = 'SilentlyContinue'\n" + script, 'utf16le').toString('base64')],
     { encoding: 'utf8', timeout: 30_000 }).trim();
 }
 

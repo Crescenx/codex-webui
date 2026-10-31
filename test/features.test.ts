@@ -16,16 +16,18 @@ import { HttpError } from '../server/security.ts';
 
 test('service installation retains WSL launch variables without storing a stale interop socket', async t => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'viewer-service-env-'));
-  const saved = Object.fromEntries(['WSL_DISTRO_NAME', 'WSLENV', 'WSL_INTEROP'].map(key => [key, process.env[key]]));
+  const saved = Object.fromEntries(['WSL_DISTRO_NAME', 'WSLENV', 'WSL_INTEROP', 'VIEWER_PWSH'].map(key => [key, process.env[key]]));
   try {
     t.mock.method(os, 'homedir', () => dir);
     t.mock.method(childProcess, 'spawnSync', (command: string, args: string[]) => { assert.equal(command, 'systemctl'); assert.deepEqual(args, ['--user', 'daemon-reload']); return { status: 0 }; });
     syncBuiltinESMExports();
     process.env.WSL_DISTRO_NAME = 'Test Distro'; process.env.WSLENV = 'CUSTOM/u'; process.env.WSL_INTEROP = '/run/WSL/old_interop';
+    process.env.VIEWER_PWSH = '/mnt/c/Program Files/PowerShell/7/pwsh.exe';
     await import('../scripts/service.ts');
     const unit = await readFile(path.join(dir, '.config/systemd/user/codex-viewer.service'), 'utf8');
     assert.match(unit, /Environment="WSL_DISTRO_NAME=Test Distro"/); assert.match(unit, /Environment="WSLENV=CUSTOM\/u"/);
     assert.doesNotMatch(unit, /WSL_INTEROP/);
+    assert.ok(unit.includes('Environment="VIEWER_PWSH=/mnt/c/Program Files/PowerShell/7/pwsh.exe"'));
   } finally {
     t.mock.restoreAll(); syncBuiltinESMExports();
     for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }

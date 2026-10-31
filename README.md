@@ -33,10 +33,21 @@ Windows 浏览器里的本地 Codex 工作台；Node.js 和 `codex app-server` �
 需要 Node.js 24+、已登录的 Codex CLI（开发验证版本 0.154.0）。在 WSL 项目目录执行：
 
 ```sh
+git clone https://github.com/Crescenx/codex-webui.git
+cd codex-webui
+# 使用 nvm 时可先运行 nvm install && nvm use
 npm ci
 npm run build
-npm start -- --root /home/andantex/projects
+npm start -- --root "$HOME/projects"
 ```
+
+`--root` 应替换为本机实际存在的工作目录。源码不依赖原作者的目录或项目内临时文件；`node_modules`、`dist`、`dist-obsidian` 均在本机重新生成。`npm ci` 不安装或启用系统服务。
+
+Windows 文件夹选择器、默认应用打开、快捷方式和 Obsidian CLI 需要 Windows PowerShell 7，确保 WSL 的 PATH 中能运行 `pwsh.exe`。若没有加入 PATH，可设置 `VIEWER_PWSH` 为本机入口，例如 `export VIEWER_PWSH='/mnt/c/Program Files/PowerShell/7/pwsh.exe'`，再启动或安装服务。浏览器与 Node 测试不需要这些 Windows 操作。
+
+可选的 Antigravity 后端与 App core 不包含在本仓库，需按上面的接入说明另行安装和登录；新机器没有安装时使用 Codex。Obsidian 插件的全部源码和打包入口包含在本仓库，使用 `npm run build:obsidian` 生成插件文件。
+
+Git 只保存源码和文档。Viewer 的会话设置、Watchdog、附件、引用与托管工作副本位于数据目录（默认 `~/.local/share/codex-viewer`）；Codex 登录与原生会话位于 `CODEX_HOME`（默认 `~/.codex`）。这些用户数据和凭据不随 clone 复制。新机器应独立登录；需要旧历史时另行迁移对应数据，并核对项目路径。浏览器 localStorage 中的草稿与布局也不属于 Git。
 
 打开启动时打印的完整链接。服务只监听 `127.0.0.1:8787`，浏览器登录后会移除 URL 中的令牌。不要分享启动链接。有效页面／API 请求会同步续期登录与 Cookie，连续 24 小时无访问才过期；SSE 心跳本身不续期。登录过期时停止自动重连并保留草稿，请重新打开启动链接；意外重启服务也需要重新登录。默认授权目录为 `~/projects`，可重复传入 `--root`，通过 `--port` 更改端口。
 
@@ -143,7 +154,7 @@ Linux Chromium 的截图与视口模拟不能证明真实 Windows 字体、Windo
 WSL 已启用 systemd 时：
 
 ```sh
-npm run service:install -- /home/andantex/projects
+npm run service:install -- "$HOME/projects"
 systemctl --user enable --now codex-viewer
 loginctl enable-linger "$USER"
 npm run shortcut:install
@@ -189,9 +200,9 @@ v1 边界：每个 vault 一个助手视图，可迁移到普通标签页，界�
 
 助手复用 Viewer 的 Sidebar，按项目分组，包含新对话、会话标题和目录搜索、当前对话全文查找、重命名、删除与保存讨论。删除调用 Codex thread/archive，移出列表并保留原生归档；正在运行、待审批、有活动 Goal 或定时监控的会话须先停止。
 
-统一源码目录：/home/andantex/projects/codex-viewer。插件源码在 obsidian-plugin/，构建产物在 dist-obsidian/；knowbase 安装目录为 D:\Documents\obsidian\knowbase\.obsidian\plugins\vault-assistant。两个入口共用 systemd 用户服务 codex-viewer，地址 http://127.0.0.1:8787，数据位于 /home/andantex/.local/share/codex-viewer。旧 assistant 服务在迁移完成后停用，原工作树与数据保留作回退。
+插件源码在 `obsidian-plugin/`，构建产物在 `dist-obsidian/`；安装目录为目标 vault 的 `.obsidian/plugins/vault-assistant/`。浏览器和插件连接同一个 Viewer 后端，默认地址为 `http://127.0.0.1:8787`，默认数据目录为 `~/.local/share/codex-viewer`。
 
-更新插件：在统一源码目录运行 npm run build:obsidian，然后仅复制 dist-obsidian 的 main.js、styles.css、manifest.json 到 knowbase 的插件目录，保留 data.json；运行 node scripts/vault-cli.ts knowbase plugin:reload id=vault-assistant。已有配对和会话草稿无需重建。后端更新仍需在任务空闲时使用 Viewer 的“重启整个后端”；插件收到重启通知后原地重连，不刷新 Obsidian。
+更新插件：在本仓库目录运行 `npm run build:obsidian`，然后仅复制 `dist-obsidian` 的 `main.js`、`styles.css`、`manifest.json` 到目标 vault 的插件目录，保留 `data.json`；运行 `node scripts/vault-cli.ts <vault-name> plugin:reload id=vault-assistant`。已有配对和会话草稿无需重建。后端更新仍需在任务空闲时使用 Viewer 的“重启整个后端”；插件收到重启通知后原地重连，不刷新 Obsidian。
 
 迁移数据：先确认两个后端均空闲并停止旧 assistant，再执行 `node scripts/merge-assistant-data.ts <旧数据目录> <Viewer 数据目录> <新备份目录>`。脚本保留 Viewer 原记录，合并配对、引用、巡检、附件与会话设置；SQLite 使用 backup API 保留 WAL 数据，附件元数据路径随目录迁移。有冲突则报错，不覆盖。随后让插件连接统一后端并停用旧服务。原生对话仍由相同 CODEX_HOME 管理，无需复制对话记录。
 
