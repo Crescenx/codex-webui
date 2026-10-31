@@ -30,7 +30,7 @@ Windows 浏览器里的本地 Codex 工作台；Node.js 和 `codex app-server` �
 
 ## 启动
 
-需要 Node.js 24+、已登录的 Codex CLI（开发验证版本 0.154.0）。在 WSL 项目目录执行：
+需要 Node.js 24+、已登录的 Codex CLI（本次独立检出验证版本 0.165.0）。在 WSL 项目目录执行：
 
 ```sh
 git clone https://github.com/Crescenx/codex-webui.git

@@ -309,6 +309,10 @@ test('bracket math streams, renders and copies its exact original source',async(
     const body=page.locator('.assistant .markdown');
     await expect(body).toContainText('\\[');await expect(body.locator('.katex')).toHaveCount(0);
     await expect(body.locator('.katex')).toHaveCount(4);await expect(body.locator('.katex-display')).toHaveCount(2);
+    expect(await page.evaluate(async () => {
+      await document.fonts.load('16px KaTeX_Size3');
+      return document.fonts.check('16px KaTeX_Size3');
+    })).toBe(true);
     await expect(body.locator('.katex-error')).toHaveCount(0);await expect(body.locator('pre code')).toHaveText('\\[这段代码不渲染\\]\n');
     await page.locator('.assistant').getByRole('button',{name:'复制 Markdown',exact:true}).click();
     const original=await page.evaluate(()=>navigator.clipboard.readText());

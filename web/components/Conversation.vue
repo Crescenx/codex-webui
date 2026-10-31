@@ -164,7 +164,9 @@ watch(targetItem, () => { jumpedTo = ''; schedule(); });
 function scroll() {
   const el = conversation.value; if (!el) return;
   syncOffset?.(true);
-  if (userScrolling && Math.abs(el.scrollTop - writtenOffset) > 1) {
+  // Focus and scrollIntoView can move the viewport without a wheel/key event.
+  if (Math.abs(el.scrollTop - writtenOffset) > 1) {
+    if (!userScrolling) follow.value = el.scrollHeight - el.clientHeight - el.scrollTop < 1;
     waitingForScroll = false;
     if (resumeAtBottom && el.scrollHeight - el.clientHeight - el.scrollTop < 1) follow.value = true;
     savePosition();
@@ -265,7 +267,7 @@ defineExpose({openSearch});
     <span role="status">已选 {{ selectedRecords.size }} 条 · 其中工具 {{ selectedTools }} 条</span><span class="subtle">默认只选文字；展开工具后可逐条勾选</span>
     <button v-if="selectedTools" type="button" class="quiet" @click="clearToolRecords">清除所选工具</button><button type="button" :disabled="!selectedRecords.size" @click="forwardRecords">转发到…</button>
   </div>
-  <div :id="readonly ? 'agent-conversation' : 'conversation'" class="conversation" :class="{ 'has-history': rows.length }" ref="conversation" tabindex="0" :aria-label="readonly ? '子代理执行记录' : '对话记录'" @scroll="scroll" @scrollend="scrollEnd" @pointerdown="hold($event); manualScroll($event)" @wheel.passive="manualScroll" @keydown="manualScroll">
+  <div :id="readonly ? 'agent-conversation' : 'conversation'" class="conversation" :class="{ 'has-history': rows.length }" ref="conversation" tabindex="0" :aria-label="readonly ? '子代理执行记录' : '对话记录'" @scroll="scroll" @scrollend="scrollEnd" @pointerdown.capture="scroll()" @pointerdown="hold($event); manualScroll($event)" @wheel.passive="manualScroll" @keydown="manualScroll">
     <div v-if="!current && !readonly && !threadId" class="welcome"><div class="eyebrow">YOUR WORK, IN FOCUS</div><h2>从一个项目开始。</h2><p>选择左侧已有对话，或选择项目目录新建任务。<br>选好项目后，即可设置模型、思考强度、Plan 和 Skills。</p><button id="welcome-new" class="primary" @click="emit('new')">选择项目，新建任务</button></div>
     <p v-if="!rows.length && !readonly && store.state.hydrating" class="subtle">正在读取对话…</p>
     <button v-if="!readonly && store.draft.value?.readError" class="quiet" @click="store.selectThread(threadId)">重新读取对话</button>
