@@ -214,7 +214,8 @@ createInterface({ input: process.stdin }).on('line', line => {
     };
     const watchdogRun=/^\[Scheduled Watchdog check\][\s\S]*?\nRun ID: ([\w-]+)/.exec(String(p.input[0]?.text));
     if(watchdogRun && !String(p.input[0]?.text).includes('watchdog-no-report')) {
-      const report=()=>fetch(process.env.VIEWER_WATCHDOG_URL!,{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${process.env.VIEWER_WATCHDOG_TOKEN}`},body:JSON.stringify({name:'watchdog_report',arguments:{runId:watchdogRun[1],outcome:String(p.input[0]?.text).includes('watchdog-continue')?'continue':'complete'},_meta:{threadId:t.id}})}).then(finish);
+      const adaptive = String(p.input[0]?.text).includes('watchdog-adaptive') ? { next: { revision: Number(/\nRevision: (\d+)/.exec(String(p.input[0]?.text))?.[1]), delayMinutes: 10, intervalMinutes: 30, prompt: 'updated inspection instructions' } } : {};
+      const report=()=>fetch(process.env.VIEWER_WATCHDOG_URL!,{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${process.env.VIEWER_WATCHDOG_TOKEN}`},body:JSON.stringify({name:'watchdog_report',arguments:{runId:watchdogRun[1],outcome:String(p.input[0]?.text).includes('watchdog-continue')?'continue':'complete',...adaptive},_meta:{threadId:t.id}})}).then(finish);
       if(String(p.input[0]?.text).includes('watchdog-approval')) {const id='approval-'+next;waiting.set(id,()=>{void report();});send({id,method:'item/commandExecution/requestApproval',params:{threadId:t.id,turnId:turn.id,itemId:'cmd',command:'read remote status',availableDecisions:['accept','decline','cancel']}});}
       else if(String(p.input[0]?.text).includes('watchdog-hold'))waiting.set('tool-'+turn.id,()=>{void report();});else void report();
     } else if (p.input[0]?.text === 'reasoning-stream') {

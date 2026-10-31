@@ -516,9 +516,9 @@ export async function serve(options: { roots: string[]; dataDir: string; runtime
     const args=object(b.arguments || {}), name=string(b.name);
     if(hybrid.isInactive(threadId)&&!['watchdog_list','watchdog_report'].includes(name))throw new HttpError(409,'此执行者已交出主任务或状态待核对');
     const active=watchdogs.activeForThread(threadId);
-    if(active && !['watchdog_report','watchdog_list'].includes(name) && !(name==='watchdog_control' && args.action==='delete'))throw new HttpError(403,'定时检查期间不能创建或修改监控任务；仅允许按用户指令删除当前会话的任务');
+    if(active && !['watchdog_report','watchdog_list'].includes(name) && !(name==='watchdog_control' && args.action==='delete'))throw new HttpError(403,'定时检查期间不能创建或修改其他计划；请通过 watchdog_report.next 调整本任务的后续时间和指令，或按用户指令删除当前会话任务');
     if(name==='watchdog_list')return {data:watchdogs.list().filter(w=>w.threadId===threadId),timeZone:watchdogTimeZone()};
-    if(name==='watchdog_report')return watchdogs.report(string(args.runId),threadId,{outcome:args.outcome,summary:args.summary} as WatchdogReport);
+    if(name==='watchdog_report')return watchdogs.report(string(args.runId),threadId,{outcome:args.outcome,summary:args.summary,next:args.next} as WatchdogReport);
     if(name==='watchdog_create')return {watchdog:watchdogs.create(threadId,t.cwd,await validatedWatchdog(t,args))};
     const task=await authorizedWatchdog(string(args.id),threadId);
     if(name==='watchdog_update')return {watchdog:watchdogs.update(task.id,args.revision,await validatedWatchdog(t,args))};

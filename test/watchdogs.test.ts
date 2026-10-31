@@ -131,6 +131,76 @@ test('committed watchdog writes succeed when change notification fails', async t
   } finally { db.close(); await rm(dir, { recursive: true, force: true }); }
 });
 
+test('adaptive reports commit timing and instructions only on success and preserve concurrent user changes', async () => {
+  const dir = await mkdtemp('/tmp/watchdog-adaptive-'); let db = new Watchdogs(dir + '/tasks.sqlite');
+  const minute = 60000, due = 60 * minute, end = 65 * minute;
+  try {
+    const task = db.create('thread', dir, config, 0), run = db.claim(task.id, foreground, due)!;
+    const next = { revision: task.revision, delayMinutes: 10, intervalMinutes: 30, prompt: 'new authorized inspection instructions' };
+    db.report(run.id, task.threadId, { outcome: 'continue', next }, due);
+    assert.equal(db.get(task.id).prompt, config.prompt);
+    db.close(); db = new Watchdogs(dir + '/tasks.sqlite');
+    assert.deepEqual(db.run(run.id).report?.next, next);
+    db.finish(run.id, 'completed', '', end);
+    let saved = db.get(task.id);
+    assert.equal(saved.nextRunAt, end + 10 * minute); assert.equal(saved.intervalMinutes, 30);
+    assert.equal(saved.prompt, next.prompt); assert.equal(saved.revision, task.revision + 1);
+    assert.equal(db.run(run.id).config.prompt, config.prompt);
+    const followup = db.claim(task.id, foreground, saved.nextRunAt!)!;
+    assert.equal(followup.config.prompt, next.prompt);
+    db.report(followup.id, task.threadId, { outcome: 'continue' });
+    db.finish(followup.id, 'completed', '', end + 11 * minute);
+    assert.equal(db.get(task.id).nextRunAt, end + 40 * minute);
+
+    for (const action of ['edit', 'pause', 'delete', 'failed', 'uncertain', 'interrupted'] as const) {
+      const w = db.create(action, dir, config, 0), r = db.claim(w.id, foreground, due)!;
+      db.report(r.id, action, { outcome: 'continue', next: { ...next, revision: w.revision } }, due);
+      if (action === 'edit') db.update(w.id, w.revision, { ...config, prompt: 'user edit', intervalMinutes: 20 }, due);
+      if (action === 'pause' || action === 'delete') db.control(w.id, w.revision, action, due);
+      db.finish(r.id, ['failed','uncertain','interrupted'].includes(action) ? action as 'failed' | 'uncertain' | 'interrupted' : 'completed', '', end);
+      saved = db.get(w.id);
+      assert.equal(saved.prompt, action === 'edit' ? 'user edit' : config.prompt);
+      assert.equal(saved.state, action === 'edit' ? 'enabled' : action === 'pause' ? 'paused' : action === 'delete' ? 'deleted' : 'needs_input');
+      assert.equal(saved.nextRunAt, action === 'edit' ? due + 20 * minute : null);
+    }
+  } finally { db.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test('adaptive reports validate scope, conflicts, timing and one-off/calendar semantics', async () => {
+  const dir = await mkdtemp('/tmp/watchdog-adaptive-validation-'), db = new Watchdogs(dir + '/tasks.sqlite');
+  const due = instant('2026-09-16T09:00'), end = instant('2026-09-16T09:05');
+  try {
+    const c = calendarConfig({ kind: 'weekly', weekdays: [3], time: '09:00' });
+    const task = db.create('weekly', dir, c, due - 1), run = db.claim(task.id, foreground, due)!;
+    for (const next of [null, [], { revision: 1, unknown: true }, { revision: 1, delayMinutes: 0 }, { revision: 1, delayMinutes: -1 }, { revision: 1, delayMinutes: '10' }, { revision: 1, delayMinutes: Infinity }, { revision: 1, delayMinutes: 1e300 }, { revision: 1, prompt: '' }, { revision: 1, intervalMinutes: 0 }, { revision: 1, intervalMinutes: 10, schedule: c.schedule }, { revision: 1, schedule: { kind: 'once', at: '2000-01-01T09:00' } }]) {
+      assert.throws(() => db.report(run.id, task.threadId, { outcome: 'continue', next } as WatchdogReport, due));
+      assert.equal(db.run(run.id).report, null);
+    }
+    assert.throws(() => db.report(run.id, 'other', { outcome: 'continue', next: { revision: 1, delayMinutes: 10 } }, due), /当前会话/);
+    assert.throws(() => db.report(run.id, task.threadId, { outcome: 'complete', next: { revision: 1 } }, due), /只有 continue/);
+    assert.throws(() => db.report(run.id, task.threadId, { outcome: 'continue', next: { revision: 2 } }, due), /计划已变更/);
+    db.report(run.id, task.threadId, { outcome: 'continue', next: { revision: 1, delayMinutes: 0.5 } }, due);
+    db.finish(run.id, 'completed', '', end);
+    assert.equal(db.get(task.id).nextRunAt, end + 30000);
+    const second = db.claim(task.id, foreground, end + 30000)!;
+    db.report(second.id, task.threadId, { outcome: 'continue' }); db.finish(second.id, 'completed', '', end + 60000);
+    assert.equal(db.get(task.id).nextRunAt, instant('2026-09-23T09:00'));
+    for (const next of [{ delayMinutes: 10 }, { schedule: { kind: 'once' as const, at: '2026-09-16T09:06' } }, { intervalMinutes: 10 }]) {
+      const w = db.create(JSON.stringify(next), dir, calendarConfig({ kind: 'once', at: '2026-09-16T09:00' }), due - 1);
+      const r = db.claim(w.id, foreground, due)!;
+      db.report(r.id, w.threadId, { outcome: 'continue', next: { revision: w.revision, ...next } }, due);
+      db.finish(r.id, 'completed', '', end + 120000);
+      const saved = db.get(w.id);
+      assert.equal(saved.state, 'enabled');
+      assert.equal(saved.nextRunAt, 'schedule' in next ? end + 120000 : end + 720000);
+    }
+    const w = db.create('conflict', dir, config, 0), r = db.claim(w.id, foreground, 3600000)!;
+    db.update(w.id, w.revision, { ...config, prompt: 'user changed this' });
+    assert.throws(() => db.report(r.id, w.threadId, { outcome: 'continue', next: { revision: w.revision, delayMinutes: 10 } }), /已被修改/);
+    db.report(r.id, w.threadId, { outcome: 'continue' });
+  } finally { db.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
 test('per-instance watchdog launch configuration is absent from forked workers', async () => {
   const adapter = new AppServer({ command: process.execPath, args: [path.resolve('test/fake-codex.ts')], env: { ...process.env, VIEWER_TEST_BASE: 'preserved' } });
   adapter.configureLaunch(watchdogLaunch('http://127.0.0.1:1/internal/watchdogs', 'test-only-token'));
@@ -230,6 +300,16 @@ test('calendar HTTP and MCP use the same execution, snapshot and report path', a
     const daily = calendarConfig({ kind: 'daily', everyDays: 2, startDate: '2099-01-01', time: '09:30' });
     const updated = (await tool('watchdog_update', { id: weekly.id, revision: (await http('/watchdogs/' + weekly.id)).watchdog.revision, ...daily })).watchdog;
     assert.deepEqual(updated.schedule, daily.schedule); assert.equal(updated.nextRunAt, instant('2099-01-01T09:30'));
+    const { watchdog: adaptive } = await tool('watchdog_create', { ...config, prompt: 'watchdog-adaptive watchdog-continue' });
+    await tool('watchdog_control', { id: adaptive.id, revision: adaptive.revision, action: 'run_now' });
+    const { data: [adaptiveRun] } = await until(() => http('/watchdogs/' + adaptive.id + '/runs'), r => r.data[0]?.status === 'completed');
+    const saved = (await http('/watchdogs/' + adaptive.id)).watchdog;
+    assert.equal(saved.state, 'enabled'); assert.equal(saved.intervalMinutes, 30);
+    assert.equal(saved.prompt, 'updated inspection instructions');
+    assert.equal(saved.nextRunAt, adaptiveRun.endedAt + 10 * 60000);
+    assert.equal(saved.revision, adaptiveRun.revision + 1);
+    assert.equal(adaptiveRun.config.prompt, 'watchdog-adaptive watchdog-continue');
+    assert.deepEqual(adaptiveRun.report.next, { revision: adaptiveRun.revision, delayMinutes: 10, intervalMinutes: 30, prompt: saved.prompt });
   } finally { await app.stop(); await rm(dir, { recursive: true, force: true }); }
 });
 
