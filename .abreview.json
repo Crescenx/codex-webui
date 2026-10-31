@@ -1,9 +1,0 @@
-{
-  "profiles": {
-    "astra-xhigh": {
-      "provider": "codex",
-      "model": "gpt-6-astra",
-      "effort": "xhigh"
-    }
-  }
-}

@@ -41,7 +41,21 @@ test('Google model controls and native cache usage render in the shared UI',asyn
   await expect(page.locator('#plan-mode-note')).toHaveCount(0);
   google.emit('notice',{method:'thread/tokenUsage/updated',params:{threadId:thread.nativeSessionId,tokenUsage:{total:{inputTokens:200,cachedInputTokens:150,totalTokens:230},last:{inputTokens:100,cachedInputTokens:80,totalTokens:115},modelContextWindow:null,lastScope:'nativeUsageUpdateDelta'}}});
   await expect(page.locator('.usage-bar')).toContainText('Cache hit 80%');
-  await expect(page.locator('.usage-bar')).toContainText('Context left —');
+  await expect(page.locator('.usage-bar')).toContainText('Context left 未提供');
+  const reportContext = (tokenUsage: Record<string, unknown>) => google.emit('notice', {
+   method: 'thread/tokenUsage/updated', params: { threadId: thread.nativeSessionId, tokenUsage },
+  });
+  reportContext({total:{totalTokens:2_000_000},last:{inputTokens:25_000,totalTokens:25_000},
+   modelContextWindow:100_000,lastScope:'nativeContextWindowEstimate',
+   contextWindow:{estimatedTokensUsed:25_000,maxContextTokens:100_000,tokenBreakdown:{},truncationReason:'test'}});
+  await expect(page.locator('.usage-bar')).toContainText('Context left 75%');
+  reportContext({total:{totalTokens:2_010_000},last:{inputTokens:30_000,cachedInputTokens:24_000,outputTokens:5_000,totalTokens:35_000},
+   modelContextWindow:100_000,lastScope:'nativeModelInvocation',
+   contextWindow:{estimatedTokensUsed:25_000,maxContextTokens:100_000}});
+  await expect(page.locator('.usage-bar')).toContainText('Context left 65%');
+  await expect(page.locator('.usage-bar')).toContainText('Cache hit 80%');
+  reportContext({total:{totalTokens:2_010_000},last:{totalTokens:10_000},modelContextWindow:null,lastScope:'nativeUsageUpdateDelta'});
+  await expect(page.locator('.usage-bar')).toContainText('Context left 未提供');
   await expect(page.locator('.usage-bar')).not.toContainText('Weekly');
   await expect(page.locator('#reset-usage')).toHaveCount(0);
   await page.locator('#refresh-google-usage').click();
@@ -73,6 +87,15 @@ test('Google model controls and native cache usage render in the shared UI',asyn
   await expect(page.locator('#model')).toHaveValue('mock');
   await expect(page.locator('#reset-usage')).toBeVisible();
   await expect(page.locator('.usage-bar')).toContainText('Weekly left 73%');
+  await expect(page.locator('[data-quota-group]')).toHaveCount(0);
+  // Quota follows the selected model even before a cross-provider turn is sent.
+  await page.locator('#model').selectOption('antigravity/mock');
+  await expect(page.locator('[data-quota-group="google"]')).toContainText('5h 剩余 90%');
+  await expect(page.locator('#reset-usage')).toHaveCount(0);
+  await expect(page.locator('.usage-bar')).not.toContainText('Weekly left');
+  await page.locator('#model').selectOption('mock');
+  await expect(page.locator('.usage-bar')).toContainText('Weekly left 73%');
+  await expect(page.locator('#reset-usage')).toBeVisible();
   await expect(page.locator('[data-quota-group]')).toHaveCount(0);
  }finally{await app.stop();await rm(dir,{recursive:true,force:true});}
 });

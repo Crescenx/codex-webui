@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { useViewer } from '../store.ts';
 import type { RateWindow } from '../../shared/protocol.ts';
+import { runtimeForModel, runtimeOf } from '../../shared/runtime.ts';
 const store = useViewer();
 const dialog = ref<HTMLDialogElement>(), loading = ref(false), error = ref(''), result = ref('');
 const unavailable = computed(() => store.state.connection !== '已连接' || store.state.restarting || store.state.restartPending || store.state.usageResetPending);
@@ -27,9 +28,14 @@ const context = computed(() => {
   const used=usage?.last?.totalTokens,total=usage?.modelContextWindow;
   return typeof used === 'number' && Number.isFinite(used) && used >= 0 && typeof total === 'number' && Number.isFinite(total) && total > 0
     ? { left: percent(used, total), title: `当前上下文 ${used.toLocaleString()} / ${total.toLocaleString()} tokens（最近一次报告）` }
-    : { left: '—', title: usage?.lastScope ? '后端未提供上下文窗口大小；累计消耗与缓存命中不代表当前上下文占用' : '等待当前会话的上下文用量报告' };
+    : { left: usage?.lastScope ? '未提供' : '—', title: usage?.lastScope ? '当前后端未提供可计算上下文剩余量的数据；累计消耗与缓存命中不代表当前上下文占用' : '等待当前会话的上下文用量报告' };
 });
-const codexAccount = computed(() => store.current.value?.runtimeId !== 'antigravity');
+const quotaRuntime = computed(() => {
+  const model = store.draft.value?.desired?.model || store.current.value?.settings?.model;
+  return model ? runtimeForModel(model) : runtimeOf(store.current.value || {});
+});
+const codexAccount = computed(() => quotaRuntime.value === 'codex');
+watch(quotaRuntime, () => { void refreshUsage(); });
 const cache = computed(() => {
   const usage=store.current.value?.tokenUsage, input=usage?.last?.inputTokens, cached=usage?.last?.cachedInputTokens;
   if(typeof input!=='number'||input<=0||typeof cached!=='number')return null;
